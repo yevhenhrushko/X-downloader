@@ -225,14 +225,23 @@ def _extract_tweet_info(url: str) -> dict:
         raise DownloadError(f"Failed to extract tweet info: {e}") from e
 
 
-def _download_twitter_video(url: str, tmpdir: str) -> None:
+def _download_twitter_video(url: str, tmpdir: str, progress_callback=None) -> None:
     """Download video using yt-dlp (best quality with ffmpeg merge)."""
+    def _progress_hook(d):
+        if d['status'] == 'downloading' and progress_callback:
+            pct_str = d.get('_percent_str', '').strip().rstrip('%')
+            try:
+                progress_callback("download", int(float(pct_str)))
+            except (ValueError, TypeError):
+                pass
+
     ydl_opts = {
         "format": "bestvideo+bestaudio/best",
         "outtmpl": os.path.join(tmpdir, "%(id)s_%(autonumber)s.%(ext)s"),
         "merge_output_format": "mp4",
-        "quiet": False,
-        "no_warnings": False,
+        "quiet": True,
+        "no_warnings": True,
+        "progress_hooks": [_progress_hook],
     }
     cookies = _get_cookies("twitter")
     if cookies:
@@ -262,13 +271,13 @@ def _download_twitter_images(url: str, tmpdir: str) -> None:
         raise DownloadError(f"gallery-dl error: {result.stderr.strip()}")
 
 
-def _download_twitter(url: str, tmpdir: str) -> tuple[str, str]:
+def _download_twitter(url: str, tmpdir: str, progress_callback=None) -> tuple[str, str]:
     """Download Twitter media. Returns (username, tweet_id)."""
     url_username, tweet_id = parse_tweet_url(url)
     info = _extract_tweet_info(url)
     username = info.get("uploader_id") or url_username
     if info.get("formats"):
-        _download_twitter_video(url, tmpdir)
+        _download_twitter_video(url, tmpdir, progress_callback=progress_callback)
     else:
         _download_twitter_images(url, tmpdir)
     return username, tweet_id
@@ -496,7 +505,7 @@ def _ensure_h264(filepath: str, progress_callback=None) -> str:
                         if pct != last_pct and pct % 10 == 0:
                             print(f"  Encoding: {pct}%", file=sys.stderr)
                             if progress_callback:
-                                progress_callback(pct)
+                                progress_callback("convert", pct)
                             last_pct = pct
                     except (ValueError, ZeroDivisionError):
                         pass
@@ -601,7 +610,7 @@ def download_media(url: str, force: bool = False, progress_callback=None) -> lis
 
     with tempfile.TemporaryDirectory() as tmpdir:
         if platform == "twitter":
-            username, media_id = _download_twitter(url, tmpdir)
+            username, media_id = _download_twitter(url, tmpdir, progress_callback=progress_callback)
         elif platform == "instagram":
             username, media_id = _download_instagram(url, tmpdir)
         elif platform == "telegram":

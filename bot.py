@@ -188,20 +188,23 @@ async def _process_url(update: Update, url: str) -> None:
         if is_channel:
             await _handle_channel_download(update, status_msg, url)
         else:
-            # Run download in executor with encoding progress updates
-            progress_state = {"pct": -1, "active": True}
+            # Run download in executor with progress updates
+            progress_state = {"msg": "", "active": True}
 
-            def _on_progress(pct):
-                progress_state["pct"] = pct
+            def _on_progress(phase, pct):
+                if phase == "download":
+                    progress_state["msg"] = f"Downloading... {pct}%"
+                elif phase == "convert":
+                    progress_state["msg"] = f"Converting video... {pct}%"
 
             async def _update_progress():
-                last_shown = -1
+                last_msg = ""
                 while progress_state["active"]:
                     await asyncio.sleep(3)
-                    pct = progress_state["pct"]
-                    if pct > last_shown and pct >= 0:
-                        await _safe_edit(status_msg, f"Converting video... {pct}%")
-                        last_shown = pct
+                    msg = progress_state["msg"]
+                    if msg and msg != last_msg:
+                        await _safe_edit(status_msg, msg)
+                        last_msg = msg
 
             progress_task = asyncio.create_task(_update_progress())
             try:

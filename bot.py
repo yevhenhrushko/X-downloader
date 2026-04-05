@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Telegram bot for downloading media from X/Twitter, Instagram, and Telegram."""
 
+import asyncio
+import functools
 import logging
 import os
 import re
 import shutil
 from pathlib import Path
 
-from telegram import InputMediaDocument, Update
+from telegram import (
+    InputMediaDocument,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
@@ -31,7 +39,7 @@ TELEGRAM_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 
 # Nginx-served directory for large files
 NGINX_DIR = Path(os.environ.get("NGINX_DIR", "/var/www/downloads"))
-SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:8080/files")
+SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:9090/files")
 
 URL_PATTERN = re.compile(r"https?://[^\s)\]>\"'.,!?]+")
 
@@ -47,17 +55,24 @@ ALLOWED_PHONES = {
 _verified_user_ids: set[int] = set()
 
 
+async def _safe_edit(status_msg, text: str) -> None:
+    """Edit status message, ignoring Telegram API errors."""
+    try:
+        await status_msg.edit_text(text)
+    except Exception as e:
+        logger.warning(f"Failed to edit status message: {e}")
+
+
 async def _is_allowed(update: Update) -> bool:
     """Check if user is allowed to use the bot."""
     user = update.effective_user
     if not user:
         return False
-    # Already verified this session
     if user.id in _verified_user_ids:
         return True
-    # Check username
     if user.username and user.username.lower() in ALLOWED_USERS:
         _verified_user_ids.add(user.id)
+        logger.info(f"Granted access to user_id={user.id} via username=@{user.username}")
         return True
     return False
 
@@ -87,10 +102,10 @@ async def auth_command(update: Update, context) -> None:
         return
     if user and user.username and user.username.lower() in ALLOWED_USERS:
         _verified_user_ids.add(user.id)
+        logger.info(f"Granted access to user_id={user.id} via username=@{user.username}")
         await update.message.reply_text("Verified by username. You're in!")
         return
 
-    from telegram import ReplyKeyboardMarkup, KeyboardButton
     keyboard = ReplyKeyboardMarkup(
         [[KeyboardButton("Share phone number", request_contact=True)]],
         one_time_keyboard=True, resize_keyboard=True,
@@ -103,9 +118,16 @@ async def auth_command(update: Update, context) -> None:
 
 async def handle_contact(update: Update, context) -> None:
     """Handle shared contact for phone verification."""
-    from telegram import ReplyKeyboardRemove
     contact = update.message.contact
     if not contact:
+        return
+
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text(
+            "Could not verify. Please try again.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return
 
     phone = contact.phone_number
@@ -113,12 +135,12 @@ async def handle_contact(update: Update, context) -> None:
         phone = f"+{phone}"
 
     if phone in ALLOWED_PHONES:
-        _verified_user_ids.add(update.effective_user.id)
+        _verified_user_ids.add(user.id)
         await update.message.reply_text(
             "Verified! You can now send URLs.",
             reply_markup=ReplyKeyboardRemove(),
         )
-        logger.info(f"User {update.effective_user.id} verified via phone {phone}")
+        logger.info(f"Granted access to user_id={user.id} via phone {phone}")
     else:
         await update.message.reply_text(
             "Phone number not authorized.",
@@ -143,25 +165,24 @@ async def handle_url(update: Update, context) -> None:
 
 async def _process_url(update: Update, url: str) -> None:
     """Download media from URL and send back to user."""
-    # Validate platform
     try:
         platform = detect_platform(url)
     except ValueError as e:
         await update.message.reply_text(f"Unsupported URL: {e}")
         return
 
-    # Send typing indicator
     await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-
     status_msg = await update.message.reply_text(f"Downloading from {platform}...")
 
     try:
-        # Check if this is a full channel download
         is_channel = False
         if platform == "telegram":
-            _, msg_id = parse_telegram_url(url)
-            if msg_id is None:
-                is_channel = True
+            try:
+                _, msg_id = parse_telegram_url(url)
+                if msg_id is None:
+                    is_channel = True
+            except ValueError as e:
+                raise DownloadError(f"Invalid Telegram URL: {e}")
 
         if is_channel:
             await _handle_channel_download(update, status_msg, url)
@@ -170,36 +191,35 @@ async def _process_url(update: Update, url: str) -> None:
             await _send_files(update, status_msg, saved)
 
     except DownloadError as e:
-        await status_msg.edit_text(f"Download failed: {e}")
+        await _safe_edit(status_msg, f"Download failed: {e}")
     except Exception as e:
         logger.exception(f"Unexpected error for {url}")
-        await status_msg.edit_text(f"Error: {e}")
+        await _safe_edit(status_msg, "An unexpected error occurred. Check bot logs.")
 
 
 async def _handle_channel_download(update: Update, status_msg, url: str) -> None:
     """Download entire channel and send in batches."""
-    import asyncio
-    import functools
-
     output_dir = DOWNLOADS_DIR / "telegram"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Run in executor — _download_telegram_channel calls asyncio.run() internally
     loop = asyncio.get_event_loop()
-    saved = await loop.run_in_executor(None, functools.partial(_download_telegram_channel, url, output_dir))
+    saved = await loop.run_in_executor(
+        None, functools.partial(_download_telegram_channel, url, output_dir)
+    )
 
     if not saved:
-        await status_msg.edit_text("No media found in this channel.")
+        await _safe_edit(status_msg, "No media found in this channel.")
         return
 
-    await status_msg.edit_text(f"Downloaded {len(saved)} files. Sending...")
+    await _safe_edit(status_msg, f"Downloaded {len(saved)} files. Sending...")
     await _send_files(update, status_msg, saved)
 
 
 async def _send_files(update: Update, status_msg, file_paths: list[str]) -> None:
     """Send files to user as documents, grouped in albums of 10."""
     if not file_paths:
-        await status_msg.edit_text("No files to send.")
+        await _safe_edit(status_msg, "No files to send.")
         return
 
     # Separate into sendable (≤50MB) and too-large (>50MB)
@@ -207,11 +227,15 @@ async def _send_files(update: Update, status_msg, file_paths: list[str]) -> None
     too_large = []
 
     for path in file_paths:
-        size = os.path.getsize(path)
+        try:
+            size = os.path.getsize(path)
+        except FileNotFoundError:
+            logger.error(f"File missing before upload: {path}")
+            continue
         if size <= TELEGRAM_UPLOAD_LIMIT:
             sendable.append(path)
         else:
-            too_large.append(path)
+            too_large.append((path, size))
 
     # Send sendable files as albums of 10
     sent_count = 0
@@ -219,33 +243,40 @@ async def _send_files(update: Update, status_msg, file_paths: list[str]) -> None
         batch = sendable[i:i + 10]
         await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
 
-        if len(batch) == 1:
-            with open(batch[0], "rb") as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=os.path.basename(batch[0]),
-                )
-        else:
-            media_group = []
-            file_handles = []
-            for path in batch:
-                fh = open(path, "rb")
-                file_handles.append(fh)
-                media_group.append(InputMediaDocument(media=fh, filename=os.path.basename(path)))
-            try:
-                await update.message.reply_media_group(media=media_group)
-            finally:
-                for fh in file_handles:
-                    fh.close()
+        try:
+            if len(batch) == 1:
+                with open(batch[0], "rb") as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=os.path.basename(batch[0]),
+                    )
+            else:
+                media_group = []
+                file_handles = []
+                for path in batch:
+                    fh = open(path, "rb")
+                    file_handles.append(fh)
+                    media_group.append(InputMediaDocument(media=fh, filename=os.path.basename(path)))
+                try:
+                    await update.message.reply_media_group(media=media_group)
+                finally:
+                    for fh in file_handles:
+                        fh.close()
 
-        sent_count += len(batch)
+            sent_count += len(batch)
+        except Exception as e:
+            logger.error(f"Failed to send batch {i + 1}–{i + len(batch)}: {e}")
+            await update.message.reply_text(
+                f"Failed to send files {i + 1}–{i + len(batch)}. Continuing with rest..."
+            )
+
         if len(sendable) > 10:
-            await status_msg.edit_text(f"Sent {sent_count}/{len(sendable)} files...")
+            await _safe_edit(status_msg, f"Sent {sent_count}/{len(sendable)} files...")
 
     # Handle too-large files via nginx link
-    for path in too_large:
+    for path, size_bytes in too_large:
         filename = os.path.basename(path)
-        size_mb = os.path.getsize(path) / (1024 * 1024)  # get size before moving
+        size_mb = size_bytes / (1024 * 1024)
         link = _serve_large_file(path)
         if link:
             await update.message.reply_text(
@@ -256,15 +287,14 @@ async def _send_files(update: Update, status_msg, file_paths: list[str]) -> None
             )
         else:
             await update.message.reply_text(
-                f"File too large ({os.path.basename(path)}), and nginx serving is not configured."
+                f"File too large ({filename}, {size_mb:.1f} MB). Could not serve via download link."
             )
 
     # Final status
-    total = len(sendable) + len(too_large)
-    summary = f"Done: {len(sendable)} sent"
+    summary = f"Done: {sent_count} sent"
     if too_large:
         summary += f", {len(too_large)} as download link(s)"
-    await status_msg.edit_text(summary)
+    await _safe_edit(status_msg, summary)
 
 
 def _serve_large_file(filepath: str) -> str | None:
@@ -272,12 +302,12 @@ def _serve_large_file(filepath: str) -> str | None:
     if not NGINX_DIR.exists():
         try:
             NGINX_DIR.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
+        except OSError as e:
+            logger.error(f"Cannot create nginx directory {NGINX_DIR}: {e}")
             return None
 
     filename = os.path.basename(filepath)
     dest = NGINX_DIR / filename
-    # Avoid name collisions
     if dest.exists():
         stem = Path(filename).stem
         ext = Path(filename).suffix
@@ -287,7 +317,12 @@ def _serve_large_file(filepath: str) -> str | None:
             counter += 1
         filename = dest.name
 
-    shutil.move(filepath, dest)
+    try:
+        shutil.move(filepath, dest)
+    except (OSError, shutil.Error) as e:
+        logger.error(f"Failed to move {filepath} to {dest}: {e}")
+        return None
+
     return f"{SERVER_URL}/{filename}"
 
 

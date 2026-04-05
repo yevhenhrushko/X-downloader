@@ -441,8 +441,24 @@ def _download_telegram_channel(url: str, output_dir: Path) -> list[str]:
 
 # --- Common ---
 
-def _ensure_h264(filepath: str) -> str:
-    """Re-encode video to H.264 if it uses VP9 or other incompatible codecs. Returns final path."""
+def _get_video_duration(filepath: str) -> float:
+    """Get video duration in seconds via ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "csv=p=0", filepath],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _ensure_h264(filepath: str, progress_callback=None) -> str:
+    """Re-encode video to H.264 if it uses VP9 or other incompatible codecs. Returns final path.
+
+    progress_callback: optional callable(percent: int) called during encoding.
+    """
     if not filepath.lower().endswith((".mp4", ".webm", ".mkv")):
         return filepath
     try:
@@ -460,13 +476,32 @@ def _ensure_h264(filepath: str) -> str:
     if codec and codec != "h264":
         out_path = filepath.rsplit(".", 1)[0] + "_h264.mp4"
         final_path = filepath.rsplit(".", 1)[0] + ".mp4"
+        duration = _get_video_duration(filepath)
         print(f"Re-encoding {codec} -> H.264...", file=sys.stderr)
         try:
-            subprocess.run(
+            # Use -progress pipe for progress tracking
+            proc = subprocess.Popen(
                 ["ffmpeg", "-i", filepath, "-c:v", "libx264", "-preset", "fast",
-                 "-crf", "18", "-c:a", "aac", "-y", "-loglevel", "warning", out_path],
-                check=True,
+                 "-crf", "18", "-c:a", "aac", "-y", "-loglevel", "warning",
+                 "-progress", "pipe:1", out_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
+            last_pct = -1
+            while proc.poll() is None:
+                line = proc.stdout.readline()
+                if line.startswith("out_time_ms=") and duration > 0:
+                    try:
+                        time_ms = int(line.split("=")[1].strip())
+                        pct = min(int(time_ms / (duration * 1_000_000) * 100), 99)
+                        if pct != last_pct and pct % 10 == 0:
+                            print(f"  Encoding: {pct}%", file=sys.stderr)
+                            if progress_callback:
+                                progress_callback(pct)
+                            last_pct = pct
+                    except (ValueError, ZeroDivisionError):
+                        pass
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, "ffmpeg")
         except FileNotFoundError:
             raise DownloadError("ffmpeg not found. Install ffmpeg: brew install ffmpeg")
         except subprocess.CalledProcessError as e:
@@ -522,7 +557,7 @@ def _check_duplicate(platform: str, username: str, media_id: str, output_dir: Pa
     return None
 
 
-def download_media(url: str, force: bool = False) -> list[str]:
+def download_media(url: str, force: bool = False, progress_callback=None) -> list[str]:
     """Download all media from a URL. Returns list of saved file paths."""
     platform = detect_platform(url)
     output_dir = DOWNLOADS_DIR / platform
@@ -576,7 +611,7 @@ def download_media(url: str, force: bool = False) -> list[str]:
 
         # Collect all downloaded files and ensure video compatibility
         downloaded_paths = _collect_files(tmpdir)
-        downloaded_paths = [_ensure_h264(p) for p in downloaded_paths]
+        downloaded_paths = [_ensure_h264(p, progress_callback=progress_callback) for p in downloaded_paths]
         if not downloaded_paths:
             raise DownloadError("No media files were downloaded.")
 

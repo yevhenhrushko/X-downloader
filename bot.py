@@ -188,7 +188,30 @@ async def _process_url(update: Update, url: str) -> None:
         if is_channel:
             await _handle_channel_download(update, status_msg, url)
         else:
-            saved = download_media(url, force=True)
+            # Run download in executor with encoding progress updates
+            progress_state = {"pct": -1, "active": True}
+
+            def _on_progress(pct):
+                progress_state["pct"] = pct
+
+            async def _update_progress():
+                last_shown = -1
+                while progress_state["active"]:
+                    await asyncio.sleep(3)
+                    pct = progress_state["pct"]
+                    if pct > last_shown and pct >= 0:
+                        await _safe_edit(status_msg, f"Converting video... {pct}%")
+                        last_shown = pct
+
+            progress_task = asyncio.create_task(_update_progress())
+            try:
+                saved = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: download_media(url, force=True, progress_callback=_on_progress)
+                )
+            finally:
+                progress_state["active"] = False
+                progress_task.cancel()
+
             await _send_files(update, status_msg, saved)
 
     except DownloadError as e:

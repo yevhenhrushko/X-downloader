@@ -92,10 +92,16 @@ def parse_telegram_url(url: str) -> tuple[str, str | None]:
     match = re.match(r"https?://web\.telegram\.org/[ak]/#(-?\d+)(?:/(\d+))?", url)
     if match:
         raw_id = match.group(1)
-        channel_id = raw_id.lstrip("-")
-        if channel_id.startswith("100"):
-            channel_id = channel_id[3:]
-        return f"c/{channel_id}", match.group(2)
+        msg_id = match.group(2)
+        if raw_id.startswith("-"):
+            # Negative = channel/group. Strip -100 prefix if present
+            channel_id = raw_id.lstrip("-")
+            if channel_id.startswith("100") and len(channel_id) > 10:
+                channel_id = channel_id[3:]
+            return f"c/{channel_id}", msg_id
+        else:
+            # Positive = user/bot chat — use as user ID directly
+            return raw_id, msg_id
 
     match = re.match(r"https?://t\.me/c/(\d+)/(\d+)", url)
     if match:
@@ -323,12 +329,13 @@ TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "f451a6ed6c0b0f596bdbb7a
 TELEGRAM_SESSION = str(SCRIPT_DIR / "telegram")
 
 
-def _resolve_telegram_entity(client, channel: str):
-    """Resolve a telegram channel string to an entity."""
+def _resolve_telegram_entity_id(channel: str):
+    """Convert channel string to Telegram entity ID or username."""
     if channel.startswith("c/"):
-        channel_id = int(f"-100{channel.split('/')[1]}")
-        return client.get_entity(channel_id)
-    return client.get_entity(channel)
+        return int(f"-100{channel.split('/')[1]}")
+    if channel.isdigit():
+        return int(channel)
+    return channel
 
 
 def _get_telegram_channel_name(entity, fallback: str) -> str:
@@ -351,11 +358,10 @@ def _download_telegram(url: str, tmpdir: str) -> tuple[str, str]:
         client = AsyncTelegramClient(TELEGRAM_SESSION, TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.start()
         try:
-            entity = await client.get_entity(
-                int(f"-100{channel.split('/')[1]}") if channel.startswith("c/") else channel
-            )
-            channel_name = getattr(entity, 'username', None) or getattr(entity, 'title', channel)
-            channel_name = channel_name.replace("/", "_").replace(" ", "_")
+            entity_id = _resolve_telegram_entity_id(channel)
+            entity = await client.get_entity(entity_id)
+            entity_name = getattr(entity, 'username', None) or getattr(entity, 'title', None) or getattr(entity, 'first_name', channel)
+            entity_name = entity_name.replace("/", "_").replace(" ", "_")
 
             msg = await client.get_messages(entity, ids=int(message_id))
             if not msg or not msg.media:
@@ -364,7 +370,7 @@ def _download_telegram(url: str, tmpdir: str) -> tuple[str, str]:
             path = await client.download_media(msg, file=tmpdir)
             if path:
                 print(f"Downloaded: {os.path.basename(path)}", file=sys.stderr)
-            return channel_name, message_id
+            return entity_name, message_id
         finally:
             await client.disconnect()
 
@@ -395,10 +401,9 @@ def _download_telegram_channel(url: str, output_dir: Path) -> list[str]:
             await client.disconnect()
 
     async def _run_download(client):
-        entity = await client.get_entity(
-            int(f"-100{channel.split('/')[1]}") if channel.startswith("c/") else channel
-        )
-        channel_name = getattr(entity, 'username', None) or getattr(entity, 'title', channel)
+        entity_id = _resolve_telegram_entity_id(channel)
+        entity = await client.get_entity(entity_id)
+        channel_name = getattr(entity, 'username', None) or getattr(entity, 'title', None) or getattr(entity, 'first_name', channel)
         channel_name = channel_name.replace("/", "_").replace(" ", "_")
 
         channel_dir = output_dir / channel_name

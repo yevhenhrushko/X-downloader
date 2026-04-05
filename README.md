@@ -27,45 +27,75 @@ Telegram uses the Telegram API (not cookies). One-time setup:
 
 Enter your phone number and the code Telegram sends you. This creates a `telegram.session` file for future use.
 
+### Check Cookie Health
+
+```bash
+./download --check
+```
+
+Reports status and expiry for all cookie files and Telegram session.
+
 ## Usage
 
 ```bash
-./download <url>
+./download <url>                          # Single URL
+./download <url1> <url2> <url3>           # Multiple URLs (batch)
+./download -c                             # Download from clipboard
+./download -f urls.txt                    # Download from file (one URL per line)
+./download --force <url>                  # Re-download even if exists
 ```
 
 ## Examples
 
 ```bash
-# X/Twitter - image
-./download "https://x.com/FermusP/status/2040698457007001753/photo/1"
+# X/Twitter
+./download "https://x.com/user/status/1234567890"
 
-# X/Twitter - video
-./download "https://x.com/i/status/2040652343121731860"
-
-# Instagram - post
+# Instagram - post/reel/story
 ./download "https://www.instagram.com/p/ABC123/"
-
-# Instagram - reel
 ./download "https://www.instagram.com/reel/XYZ789/"
-
-# Instagram - story
 ./download "https://www.instagram.com/stories/username/1234567890"
 
 # Telegram - single message
 ./download "https://t.me/channel/123"
 
-# Telegram - full channel (downloads ALL media, 10 parallel threads)
+# Telegram - full channel (10 parallel downloads)
 ./download "https://t.me/channel"
 ./download "https://web.telegram.org/a/#-1002899724101"
+
+# Batch - multiple URLs at once
+./download "https://x.com/a/status/1" "https://instagram.com/p/ABC" "https://t.me/ch/5"
+
+# Clipboard - copy URL in browser, then
+./download -c
+
+# From file
+./download -f saved_urls.txt
 ```
 
 ## Output
 
-**Single post**: `downloads/@username_ID.ext`
+Files are organized by platform:
 
-**Multiple media in one post**: `downloads/@username_ID_1.ext`, `@username_ID_2.ext`
+```
+downloads/
+  twitter/        @username_ID.ext
+  instagram/      @username_ID.ext
+  telegram/
+    ChannelName/  ID.ext
+```
 
-**Full Telegram channel**: `downloads/ChannelName/ID.ext` (subfolder per channel)
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| Multi-platform | X/Twitter, Instagram, Telegram |
+| Batch download | Multiple URLs, file input, clipboard |
+| Duplicate skip | Auto-skips already downloaded files |
+| Full channel | Download entire Telegram channels (10 threads) |
+| Best quality | Highest resolution, VP9 auto-converted to H.264 |
+| Cookie check | `--check` validates all auth |
+| Platform folders | Organized by platform automatically |
 
 ## Supported Platforms
 
@@ -75,20 +105,8 @@ Enter your phone number and the code Telegram sends you. This creates a `telegra
 | Instagram | yes | yes | no | Recommended |
 | Telegram | yes | yes | yes (10 threads) | Required (Telegram API) |
 
-## Notes
-
-- Shortlink URLs (`x.com/i/status/...`) resolve to real username
-- Videos download in best quality (merged with ffmpeg)
-- VP9 video auto-converted to H.264 for universal playback
-- Images download in original resolution
-- Full channel download skips already downloaded files
-- web.telegram.org URLs are supported
-- If cookies expire, re-export from browser and replace the file
-
 ## Dependencies
 
 - Python 3.13+
 - ffmpeg (via Homebrew: `brew install ffmpeg`)
-- yt-dlp (video downloads)
-- gallery-dl (image downloads)
-- telethon (Telegram API)
+- yt-dlp, gallery-dl, telethon, requests (via pip)

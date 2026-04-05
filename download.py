@@ -370,7 +370,12 @@ def _download_telegram_channel(url: str, output_dir: Path) -> list[str]:
     async def _run():
         client = AsyncTelegramClient(TELEGRAM_SESSION, TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.start()
+        try:
+            return await _run_download(client)
+        finally:
+            await client.disconnect()
 
+    async def _run_download(client):
         entity = await client.get_entity(
             int(f"-100{channel.split('/')[1]}") if channel.startswith("c/") else channel
         )
@@ -427,24 +432,10 @@ def _download_telegram_channel(url: str, output_dir: Path) -> list[str]:
         saved_paths = [r for r in results if r]
 
         print(f"\n  Done: {len(saved_paths)}/{total} files downloaded.", file=sys.stderr)
-        await client.disconnect()
         return saved_paths
 
     return asyncio.run(_run())
 
-
-def _load_cookies_as_dict(cookies_path: Path) -> dict:
-    """Load Netscape cookies file into a dict for requests."""
-    cookies = {}
-    with open(cookies_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 7:
-                cookies[parts[5]] = parts[6]
-    return cookies
 
 
 # --- Common ---

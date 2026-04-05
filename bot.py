@@ -4,6 +4,7 @@
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 
 from telegram import InputMediaDocument, Update
@@ -32,7 +33,7 @@ TELEGRAM_UPLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB
 NGINX_DIR = Path(os.environ.get("NGINX_DIR", "/var/www/downloads"))
 SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:8080/files")
 
-URL_PATTERN = re.compile(r"https?://\S+")
+URL_PATTERN = re.compile(r"https?://[^\s)\]>\"'.,!?]+")
 
 # Allowed users (usernames without @, and phone numbers)
 ALLOWED_USERS = {
@@ -177,10 +178,15 @@ async def _process_url(update: Update, url: str) -> None:
 
 async def _handle_channel_download(update: Update, status_msg, url: str) -> None:
     """Download entire channel and send in batches."""
+    import asyncio
+    import functools
+
     output_dir = DOWNLOADS_DIR / "telegram"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    saved = _download_telegram_channel(url, output_dir)
+    # Run in executor — _download_telegram_channel calls asyncio.run() internally
+    loop = asyncio.get_event_loop()
+    saved = await loop.run_in_executor(None, functools.partial(_download_telegram_channel, url, output_dir))
 
     if not saved:
         await status_msg.edit_text("No media found in this channel.")
@@ -238,10 +244,10 @@ async def _send_files(update: Update, status_msg, file_paths: list[str]) -> None
 
     # Handle too-large files via nginx link
     for path in too_large:
+        filename = os.path.basename(path)
+        size_mb = os.path.getsize(path) / (1024 * 1024)  # get size before moving
         link = _serve_large_file(path)
         if link:
-            filename = os.path.basename(path)
-            size_mb = os.path.getsize(path) / (1024 * 1024)
             await update.message.reply_text(
                 f"File too large for Telegram ({size_mb:.1f} MB):\n"
                 f"[{filename}]({link})\n\n"
@@ -281,7 +287,6 @@ def _serve_large_file(filepath: str) -> str | None:
             counter += 1
         filename = dest.name
 
-    import shutil
     shutil.move(filepath, dest)
     return f"{SERVER_URL}/{filename}"
 

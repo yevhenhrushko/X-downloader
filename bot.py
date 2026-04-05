@@ -74,6 +74,7 @@ async def _is_allowed(update: Update) -> bool:
         _verified_user_ids.add(user.id)
         logger.info(f"Granted access to user_id={user.id} via username=@{user.username}")
         return True
+    logger.info(f"Access denied for user_id={user.id} username=@{user.username}")
     return False
 
 

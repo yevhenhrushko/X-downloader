@@ -34,3 +34,28 @@ class TestParseTweetUrl:
     def test_invalid_url_empty(self):
         with pytest.raises(ValueError, match="Not a valid X/Twitter URL"):
             parse_tweet_url("")
+
+
+from download import build_filenames
+
+
+class TestBuildFilenames:
+    def test_single_video(self):
+        result = build_filenames("elonmusk", "123", ["video.mp4"])
+        assert result == {"video.mp4": "@elonmusk_123.mp4"}
+
+    def test_single_image(self):
+        result = build_filenames("user", "456", ["photo.jpg"])
+        assert result == {"photo.jpg": "@user_456.jpg"}
+
+    def test_multiple_media(self):
+        result = build_filenames("user", "789", ["a.jpg", "b.png", "c.mp4"])
+        assert result == {
+            "a.jpg": "@user_789_1.jpg",
+            "b.png": "@user_789_2.png",
+            "c.mp4": "@user_789_3.mp4",
+        }
+
+    def test_preserves_extension(self):
+        result = build_filenames("user", "1", ["file.webm"])
+        assert result == {"file.webm": "@user_1.webm"}

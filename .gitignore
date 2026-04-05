@@ -1,6 +1,8 @@
-cookies.txt
+*cookies*.txt
 downloads/
 __pycache__/
 *.pyc
 .env
+*.session
 venv/
+.pytest_cache/

@@ -188,7 +188,7 @@ async def _process_url(update: Update, url: str) -> None:
         if is_channel:
             await _handle_channel_download(update, status_msg, url)
         else:
-            saved = download_media(url, force=True)
+            saved = download_media(url, force=True, skip_h264=True)
             await _send_files(update, status_msg, saved)
 
     except DownloadError as e:

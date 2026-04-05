@@ -217,9 +217,12 @@ def _extract_tweet_info(url: str) -> dict:
     cookies = _get_cookies("twitter")
     if cookies:
         ydl_opts["cookiefile"] = str(cookies)
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return info or {}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info or {}
+    except Exception as e:
+        raise DownloadError(f"Failed to extract tweet info: {e}") from e
 
 
 def _download_twitter_video(url: str, tmpdir: str) -> None:
@@ -234,8 +237,11 @@ def _download_twitter_video(url: str, tmpdir: str) -> None:
     cookies = _get_cookies("twitter")
     if cookies:
         ydl_opts["cookiefile"] = str(cookies)
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        raise DownloadError(f"yt-dlp download failed: {e}") from e
 
 
 def _download_twitter_images(url: str, tmpdir: str) -> None:
@@ -260,7 +266,7 @@ def _download_twitter(url: str, tmpdir: str) -> tuple[str, str]:
     url_username, tweet_id = parse_tweet_url(url)
     info = _extract_tweet_info(url)
     username = info.get("uploader_id") or url_username
-    if bool(info.get("formats")):
+    if info.get("formats"):
         _download_twitter_video(url, tmpdir)
     else:
         _download_twitter_images(url, tmpdir)
@@ -302,8 +308,8 @@ def _download_instagram(url: str, tmpdir: str) -> tuple[str, str]:
 
 # --- Telegram ---
 
-TELEGRAM_API_ID = 34456187
-TELEGRAM_API_HASH = "f451a6ed6c0b0f596bdbb7a5f3938440"
+TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "34456187"))
+TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "f451a6ed6c0b0f596bdbb7a5f3938440")
 TELEGRAM_SESSION = str(SCRIPT_DIR / "telegram")
 
 
@@ -331,17 +337,22 @@ def _download_telegram(url: str, tmpdir: str) -> tuple[str, str]:
     if not session_path.exists():
         raise DownloadError("Telegram session not found. Run: ./venv/bin/python setup_telegram.py")
 
-    with TelegramClient(TELEGRAM_SESSION, TELEGRAM_API_ID, TELEGRAM_API_HASH) as client:
-        entity = _resolve_telegram_entity(client, channel)
-        channel_name = _get_telegram_channel_name(entity, channel)
+    try:
+        with TelegramClient(TELEGRAM_SESSION, TELEGRAM_API_ID, TELEGRAM_API_HASH) as client:
+            entity = _resolve_telegram_entity(client, channel)
+            channel_name = _get_telegram_channel_name(entity, channel)
 
-        msg = client.get_messages(entity, ids=int(message_id))
-        if not msg or not msg.media:
-            raise DownloadError("No media found in this Telegram message.")
+            msg = client.get_messages(entity, ids=int(message_id))
+            if not msg or not msg.media:
+                raise DownloadError("No media found in this Telegram message.")
 
-        path = client.download_media(msg, file=tmpdir)
-        if path:
-            print(f"Downloaded: {os.path.basename(path)}", file=sys.stderr)
+            path = client.download_media(msg, file=tmpdir)
+            if path:
+                print(f"Downloaded: {os.path.basename(path)}", file=sys.stderr)
+    except DownloadError:
+        raise
+    except Exception as e:
+        raise DownloadError(f"Telegram error: {e}") from e
 
     return channel_name, message_id
 
@@ -388,23 +399,28 @@ def _download_telegram_channel(url: str, output_dir: Path) -> list[str]:
         async def download_one(msg):
             nonlocal counter
             async with sem:
-                existing = list(channel_dir.glob(f"{msg.id}.*"))
-                if existing:
-                    counter += 1
-                    return str(existing[0])
+                try:
+                    existing = list(channel_dir.glob(f"{msg.id}.*"))
+                    if existing:
+                        counter += 1
+                        return str(existing[0])
 
-                path = await client.download_media(msg, file=str(channel_dir))
-                if path:
-                    actual_ext = Path(path).suffix
-                    final_name = f"{msg.id}{actual_ext}"
-                    final_path = channel_dir / final_name
-                    if Path(path) != final_path:
-                        Path(path).rename(final_path)
+                    path = await client.download_media(msg, file=str(channel_dir))
+                    if path:
+                        actual_ext = Path(path).suffix
+                        final_name = f"{msg.id}{actual_ext}"
+                        final_path = channel_dir / final_name
+                        if Path(path) != final_path:
+                            Path(path).rename(final_path)
+                        counter += 1
+                        print(f"\r  [{counter}/{total}] {final_name}", file=sys.stderr, end="", flush=True)
+                        return str(final_path)
                     counter += 1
-                    print(f"\r  [{counter}/{total}] {final_name}", file=sys.stderr, end="", flush=True)
-                    return str(final_path)
-                counter += 1
-                return None
+                    return None
+                except Exception as e:
+                    counter += 1
+                    print(f"\n  Warning: Failed msg {msg.id}: {e}", file=sys.stderr)
+                    return None
 
         tasks = [download_one(msg) for msg in media_messages]
         results = await asyncio.gather(*tasks)
@@ -437,23 +453,35 @@ def _ensure_h264(filepath: str) -> str:
     """Re-encode video to H.264 if it uses VP9 or other incompatible codecs. Returns final path."""
     if not filepath.lower().endswith((".mp4", ".webm", ".mkv")):
         return filepath
-    probe = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
-         "-show_entries", "stream=codec_name", "-of", "csv=p=0", filepath],
-        capture_output=True, text=True,
-    )
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", filepath],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        raise DownloadError("ffprobe not found. Install ffmpeg: brew install ffmpeg")
+    if probe.returncode != 0:
+        print(f"Warning: ffprobe failed on {os.path.basename(filepath)}, skipping re-encode.", file=sys.stderr)
+        return filepath
     codec = probe.stdout.strip()
     if codec and codec != "h264":
         out_path = filepath.rsplit(".", 1)[0] + "_h264.mp4"
-        print(f"Re-encoding {codec} -> H.264...", file=sys.stderr)
-        subprocess.run(
-            ["ffmpeg", "-i", filepath, "-c:v", "libx264", "-preset", "fast",
-             "-crf", "18", "-c:a", "aac", "-y", "-loglevel", "warning", out_path],
-            check=True,
-        )
-        os.remove(filepath)
         final_path = filepath.rsplit(".", 1)[0] + ".mp4"
-        os.rename(out_path, final_path)
+        print(f"Re-encoding {codec} -> H.264...", file=sys.stderr)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-i", filepath, "-c:v", "libx264", "-preset", "fast",
+                 "-crf", "18", "-c:a", "aac", "-y", "-loglevel", "warning", out_path],
+                check=True,
+            )
+        except FileNotFoundError:
+            raise DownloadError("ffmpeg not found. Install ffmpeg: brew install ffmpeg")
+        except subprocess.CalledProcessError as e:
+            raise DownloadError(f"ffmpeg re-encode failed for {os.path.basename(filepath)}: {e}")
+        # Delete original only after successful encode
+        os.remove(filepath)
+        shutil.move(out_path, final_path)
         return final_path
     return filepath
 
@@ -551,6 +579,8 @@ def download_media(url: str, force: bool = False) -> list[str]:
             username, media_id = _download_instagram(url, tmpdir)
         elif platform == "telegram":
             username, media_id = _download_telegram(url, tmpdir)
+        else:
+            raise DownloadError(f"No download handler for platform: {platform}")
 
         # Collect all downloaded files and ensure video compatibility
         downloaded_paths = _collect_files(tmpdir)
@@ -575,6 +605,8 @@ def download_media(url: str, force: bool = False) -> list[str]:
 def _get_clipboard_url() -> str:
     """Read URL from system clipboard (macOS)."""
     result = subprocess.run(["pbpaste"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ValueError(f"pbpaste failed (exit {result.returncode})")
     url = result.stdout.strip()
     if not url:
         raise ValueError("Clipboard is empty.")
@@ -646,7 +678,7 @@ def main():
             saved = download_media(url, force=args.force)
             all_saved.extend(saved)
             succeeded += 1
-        except (DownloadError, Exception) as e:
+        except DownloadError as e:
             print(f"Error: {e}", file=sys.stderr)
             failed += 1
             continue

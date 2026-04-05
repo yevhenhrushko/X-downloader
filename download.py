@@ -89,7 +89,7 @@ def parse_telegram_url(url: str) -> tuple[str, str | None]:
     """
     url = url.strip().rstrip("/")
 
-    match = re.match(r"https?://web\.telegram\.org/a/#(-?\d+)(?:/(\d+))?", url)
+    match = re.match(r"https?://web\.telegram\.org/[ak]/#(-?\d+)(?:/(\d+))?", url)
     if match:
         raw_id = match.group(1)
         channel_id = raw_id.lstrip("-")

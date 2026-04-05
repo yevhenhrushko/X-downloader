@@ -23,7 +23,7 @@ COOKIES_FILES = {
     "instagram": SCRIPT_DIR / "www.instagram.com_cookies.txt",
     "telegram": SCRIPT_DIR / "web.telegram.org_cookies.txt",
 }
-VENV_BIN = SCRIPT_DIR / "venv" / "bin"
+GALLERY_DL = shutil.which("gallery-dl") or str(SCRIPT_DIR / "venv" / "bin" / "gallery-dl")
 
 
 class DownloadError(Exception):
@@ -247,7 +247,7 @@ def _download_twitter_video(url: str, tmpdir: str) -> None:
 def _download_twitter_images(url: str, tmpdir: str) -> None:
     """Download images using gallery-dl."""
     cmd = [
-        str(VENV_BIN / "gallery-dl"),
+        GALLERY_DL,
         "-d", tmpdir,
         "--filename", "{tweet_id}_{num}.{extension}",
         "--no-mtime",
@@ -279,7 +279,7 @@ def _download_instagram(url: str, tmpdir: str) -> tuple[str, str]:
     """Download Instagram media via gallery-dl. Returns (username, post_id)."""
     url_username, shortcode = parse_instagram_url(url)
     cmd = [
-        str(VENV_BIN / "gallery-dl"),
+        GALLERY_DL,
         "-d", tmpdir,
         "--filename", "{filename}.{extension}",
         "--no-mtime",

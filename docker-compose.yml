@@ -12,9 +12,9 @@ services:
     volumes:
       - downloads:/app/downloads
       - nginx-files:/var/www/downloads
-      - ./x_cookies.txt:/app/x_cookies.txt:ro
-      - ./www.instagram.com_cookies.txt:/app/www.instagram.com_cookies.txt:ro
-      - ./telegram.session:/app/telegram.session:ro
+      - ./x_cookies.txt:/app/x_cookies.txt
+      - ./www.instagram.com_cookies.txt:/app/www.instagram.com_cookies.txt
+      - ./telegram.session:/app/telegram.session
 
   nginx:
     image: nginx:alpine

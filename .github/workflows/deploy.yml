@@ -40,7 +40,7 @@ jobs:
           key: ${{ secrets.OCI_SSH_KEY }}
           envs: DOWNLOADER_BOT_TOKEN
           script: |
-            DEPLOY_DIR=/home/opc/xdownloader
+            DEPLOY_DIR=/home/ubuntu/xdownloader
 
             # First-time setup
             if [ ! -d "$DEPLOY_DIR" ]; then

@@ -1,0 +1,69 @@
+name: Build, Test & Deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Oracle Cloud
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17  # v1.2.0
+        env:
+          DOWNLOADER_BOT_TOKEN: ${{ secrets.DOWNLOADER_BOT_TOKEN }}
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USER }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          envs: DOWNLOADER_BOT_TOKEN
+          script: |
+            DEPLOY_DIR=/home/opc/xdownloader
+
+            # First-time setup
+            if [ ! -d "$DEPLOY_DIR" ]; then
+              git clone https://github.com/yevhenhrushko/X-downloader.git "$DEPLOY_DIR"
+            fi
+
+            cd "$DEPLOY_DIR"
+
+            # Fetch and sync
+            git fetch origin master
+            git reset --hard origin/master
+
+            # Write .env for docker-compose
+            cat > .env << EOF2
+            DOWNLOADER_BOT_TOKEN=$DOWNLOADER_BOT_TOKEN
+            SERVER_HOST=158.180.23.247
+            EOF2
+
+            # Build and deploy
+            docker compose up -d --build --force-recreate
+
+            # Wait and verify
+            sleep 5
+            docker compose ps
+            echo "--- Last 20 log lines ---"
+            docker compose logs --tail=20

@@ -522,7 +522,7 @@ def _check_duplicate(platform: str, username: str, media_id: str, output_dir: Pa
     return None
 
 
-def download_media(url: str, force: bool = False, skip_h264: bool = False) -> list[str]:
+def download_media(url: str, force: bool = False) -> list[str]:
     """Download all media from a URL. Returns list of saved file paths."""
     platform = detect_platform(url)
     output_dir = DOWNLOADS_DIR / platform
@@ -576,8 +576,7 @@ def download_media(url: str, force: bool = False, skip_h264: bool = False) -> li
 
         # Collect all downloaded files and ensure video compatibility
         downloaded_paths = _collect_files(tmpdir)
-        if not skip_h264:
-            downloaded_paths = [_ensure_h264(p) for p in downloaded_paths]
+        downloaded_paths = [_ensure_h264(p) for p in downloaded_paths]
         if not downloaded_paths:
             raise DownloadError("No media files were downloaded.")
 

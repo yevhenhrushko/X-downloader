@@ -16,7 +16,16 @@ Export cookies from your browser using a cookie extension (e.g., "Get cookies.tx
 
 - `x_cookies.txt` — X/Twitter (rename from `x.com_cookies.txt`)
 - `www.instagram.com_cookies.txt` — Instagram
-- `web.telegram.org_cookies.txt` — Telegram
+
+### Telegram Setup
+
+Telegram uses the Telegram API (not cookies). One-time setup:
+
+```bash
+./venv/bin/python setup_telegram.py
+```
+
+Enter your phone number and the code Telegram sends you. This creates a `telegram.session` file for future use.
 
 ## Usage
 
@@ -42,29 +51,38 @@ Export cookies from your browser using a cookie extension (e.g., "Get cookies.tx
 # Instagram - story
 ./download "https://www.instagram.com/stories/username/1234567890"
 
-# Telegram
+# Telegram - single message
 ./download "https://t.me/channel/123"
+
+# Telegram - full channel (downloads ALL media, 10 parallel threads)
+./download "https://t.me/channel"
+./download "https://web.telegram.org/a/#-1002899724101"
 ```
 
 ## Output
 
-Files saved to `downloads/` folder with format:
-- Single media: `@username_ID.ext`
-- Multiple media: `@username_ID_1.ext`, `@username_ID_2.ext`
+**Single post**: `downloads/@username_ID.ext`
+
+**Multiple media in one post**: `downloads/@username_ID_1.ext`, `@username_ID_2.ext`
+
+**Full Telegram channel**: `downloads/ChannelName/ID.ext` (subfolder per channel)
 
 ## Supported Platforms
 
-| Platform | Images | Video | Auth Required |
-|----------|--------|-------|---------------|
-| X/Twitter | yes | yes | Optional (needed for NSFW/private) |
-| Instagram | yes | yes | Recommended |
-| Telegram | yes | yes | Required |
+| Platform | Images | Video | Full Channel | Auth |
+|----------|--------|-------|-------------|------|
+| X/Twitter | yes | yes | no | Optional (NSFW/private) |
+| Instagram | yes | yes | no | Recommended |
+| Telegram | yes | yes | yes (10 threads) | Required (Telegram API) |
 
 ## Notes
 
 - Shortlink URLs (`x.com/i/status/...`) resolve to real username
 - Videos download in best quality (merged with ffmpeg)
+- VP9 video auto-converted to H.264 for universal playback
 - Images download in original resolution
+- Full channel download skips already downloaded files
+- web.telegram.org URLs are supported
 - If cookies expire, re-export from browser and replace the file
 
 ## Dependencies
@@ -73,3 +91,4 @@ Files saved to `downloads/` folder with format:
 - ffmpeg (via Homebrew: `brew install ffmpeg`)
 - yt-dlp (video downloads)
 - gallery-dl (image downloads)
+- telethon (Telegram API)

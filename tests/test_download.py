@@ -27,6 +27,9 @@ class TestDetectPlatform:
     def test_telegram(self):
         assert detect_platform("https://t.me/channel/123") == "telegram"
 
+    def test_web_telegram(self):
+        assert detect_platform("https://web.telegram.org/a/#-1002899724101") == "telegram"
+
     def test_unsupported(self):
         with pytest.raises(ValueError, match="Unsupported platform"):
             detect_platform("https://youtube.com/watch?v=123")
@@ -91,18 +94,29 @@ class TestParseInstagramUrl:
 
 
 class TestParseTelegramUrl:
-    def test_public_channel(self):
+    # Single message URLs
+    def test_public_channel_message(self):
         assert parse_telegram_url("https://t.me/durov/123") == ("durov", "123")
 
-    def test_private_channel(self):
+    def test_private_channel_message(self):
         assert parse_telegram_url("https://t.me/c/1234567890/456") == ("c/1234567890", "456")
 
     def test_trailing_slash(self):
         assert parse_telegram_url("https://t.me/channel/789/") == ("channel", "789")
 
-    def test_invalid_no_message_id(self):
-        with pytest.raises(ValueError, match="Not a valid Telegram URL"):
-            parse_telegram_url("https://t.me/channel")
+    # Full channel URLs (message_id=None)
+    def test_public_channel_only(self):
+        assert parse_telegram_url("https://t.me/durov") == ("durov", None)
+
+    def test_private_channel_only(self):
+        assert parse_telegram_url("https://t.me/c/1234567890") == ("c/1234567890", None)
+
+    # web.telegram.org URLs
+    def test_web_telegram_channel(self):
+        assert parse_telegram_url("https://web.telegram.org/a/#-1002899724101") == ("c/2899724101", None)
+
+    def test_web_telegram_message(self):
+        assert parse_telegram_url("https://web.telegram.org/a/#-1002899724101/739") == ("c/2899724101", "739")
 
     def test_invalid_empty(self):
         with pytest.raises(ValueError, match="Not a valid Telegram URL"):

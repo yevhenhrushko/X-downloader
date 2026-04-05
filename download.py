@@ -34,7 +34,7 @@ def detect_platform(url: str) -> str:
         return "twitter"
     if domain == "instagram.com":
         return "instagram"
-    if domain == "t.me":
+    if domain in ("t.me", "web.telegram.org"):
         return "telegram"
     raise ValueError(f"Unsupported platform: {domain}")
 
@@ -69,21 +69,49 @@ def parse_instagram_url(url: str) -> tuple[str | None, str]:
     raise ValueError(f"Not a valid Instagram URL: {url}")
 
 
-def parse_telegram_url(url: str) -> tuple[str, str]:
-    """Extract (channel, message_id) from a Telegram URL.
+def parse_telegram_url(url: str) -> tuple[str, str | None]:
+    """Extract (channel, message_id_or_none) from a Telegram URL.
 
-    Supports: t.me/channel/123, t.me/c/1234567890/123
+    Supports:
+      t.me/channel/123, t.me/c/1234567890/123 (single message)
+      t.me/channel, t.me/c/1234567890 (full channel)
+      web.telegram.org/a/#-100CHANNELID (full channel)
+      web.telegram.org/a/#-100CHANNELID/MSGID (single message)
+    Returns message_id=None for full channel download.
     Raises ValueError if URL doesn't match expected pattern.
     """
     url = url.strip().rstrip("/")
-    # Private channel: t.me/c/channel_id/message_id
+
+    # web.telegram.org/a/#-100CHANNELID or web.telegram.org/a/#-100CHANNELID/MSGID
+    match = re.match(r"https?://web\.telegram\.org/a/#(-?\d+)(?:/(\d+))?", url)
+    if match:
+        raw_id = match.group(1)
+        # Web IDs are like -1002899724101 -> strip -100 prefix to get channel ID
+        channel_id = raw_id.lstrip("-")
+        if channel_id.startswith("100"):
+            channel_id = channel_id[3:]
+        return f"c/{channel_id}", match.group(2)  # msg_id is None if not present
+
+    # t.me/c/channel_id/message_id
     match = re.match(r"https?://t\.me/c/(\d+)/(\d+)", url)
     if match:
         return f"c/{match.group(1)}", match.group(2)
-    # Public channel: t.me/channel/message_id
+
+    # t.me/c/channel_id (full channel, no message)
+    match = re.match(r"https?://t\.me/c/(\d+)$", url)
+    if match:
+        return f"c/{match.group(1)}", None
+
+    # t.me/channel/message_id
     match = re.match(r"https?://t\.me/([^/]+)/(\d+)", url)
     if match:
         return match.group(1), match.group(2)
+
+    # t.me/channel (full channel, no message)
+    match = re.match(r"https?://t\.me/([^/]+)$", url)
+    if match:
+        return match.group(1), None
+
     raise ValueError(f"Not a valid Telegram URL: {url}")
 
 
@@ -220,8 +248,22 @@ TELEGRAM_API_HASH = "f451a6ed6c0b0f596bdbb7a5f3938440"
 TELEGRAM_SESSION = str(SCRIPT_DIR / "telegram")
 
 
+def _resolve_telegram_entity(client, channel: str):
+    """Resolve a telegram channel string to an entity."""
+    if channel.startswith("c/"):
+        channel_id = int(f"-100{channel.split('/')[1]}")
+        return client.get_entity(channel_id)
+    return client.get_entity(channel)
+
+
+def _get_telegram_channel_name(entity, fallback: str) -> str:
+    """Get a clean channel name for file naming."""
+    name = getattr(entity, 'username', None) or getattr(entity, 'title', fallback)
+    return name.replace("/", "_").replace(" ", "_")
+
+
 def _download_telegram(url: str, tmpdir: str) -> tuple[str, str]:
-    """Download Telegram media via telethon. Returns (channel, message_id)."""
+    """Download single Telegram message media. Returns (channel_name, message_id)."""
     from telethon.sync import TelegramClient
 
     channel, message_id = parse_telegram_url(url)
@@ -232,34 +274,96 @@ def _download_telegram(url: str, tmpdir: str) -> tuple[str, str]:
         sys.exit(1)
 
     with TelegramClient(TELEGRAM_SESSION, TELEGRAM_API_ID, TELEGRAM_API_HASH) as client:
-        # Resolve the channel entity
-        if channel.startswith("c/"):
-            # Private channel: t.me/c/ IDs need -100 prefix for Telegram API
-            channel_id = int(f"-100{channel.split('/')[1]}")
-            entity = client.get_entity(channel_id)
-        else:
-            entity = client.get_entity(channel)
+        entity = _resolve_telegram_entity(client, channel)
+        channel_name = _get_telegram_channel_name(entity, channel)
 
-        # Get the specific message
-        msg_id = int(message_id)
-        msg = client.get_messages(entity, ids=msg_id)
-        if not msg:
-            print("Error: Message not found.", file=sys.stderr)
-            sys.exit(1)
-
-        # Use channel username or title for naming (sanitize slashes)
-        channel_name = getattr(entity, 'username', None) or getattr(entity, 'title', channel)
-        channel_name = channel_name.replace("/", "_").replace(" ", "_")
-
-        if msg.media:
-            path = client.download_media(msg, file=tmpdir)
-            if path:
-                print(f"Downloaded: {os.path.basename(path)}", file=sys.stderr)
-        else:
+        msg = client.get_messages(entity, ids=int(message_id))
+        if not msg or not msg.media:
             print("Error: No media found in this Telegram message.", file=sys.stderr)
             sys.exit(1)
 
+        path = client.download_media(msg, file=tmpdir)
+        if path:
+            print(f"Downloaded: {os.path.basename(path)}", file=sys.stderr)
+
     return channel_name, message_id
+
+
+def _download_telegram_channel(url: str) -> list[str]:
+    """Download all media from a Telegram channel with async parallel. Returns saved file paths."""
+    import asyncio
+    from telethon import TelegramClient as AsyncTelegramClient
+
+    channel, _ = parse_telegram_url(url)
+
+    session_path = Path(TELEGRAM_SESSION + ".session")
+    if not session_path.exists():
+        print("Error: Telegram session not found. Run: ./venv/bin/python setup_telegram.py", file=sys.stderr)
+        sys.exit(1)
+
+    async def _run():
+        client = AsyncTelegramClient(TELEGRAM_SESSION, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+        await client.start()
+
+        entity = await client.get_entity(
+            int(f"-100{channel.split('/')[1]}") if channel.startswith("c/") else channel
+        )
+        channel_name = getattr(entity, 'username', None) or getattr(entity, 'title', channel)
+        channel_name = channel_name.replace("/", "_").replace(" ", "_")
+
+        # Create subfolder per channel
+        channel_dir = DOWNLOADS_DIR / channel_name
+        channel_dir.mkdir(parents=True, exist_ok=True)
+
+        # Collect all messages with media
+        print(f"Scanning channel: {channel_name}...", file=sys.stderr)
+        media_messages = []
+        async for msg in client.iter_messages(entity):
+            if msg.photo or msg.video or msg.document:
+                media_messages.append(msg)
+        total = len(media_messages)
+        print(f"Found {total} media messages.", file=sys.stderr)
+
+        if total == 0:
+            await client.disconnect()
+            return []
+
+        saved_paths = []
+        counter = 0
+        sem = asyncio.Semaphore(10)  # 10 parallel downloads
+
+        async def download_one(msg):
+            nonlocal counter
+            async with sem:
+                # Check if already downloaded
+                existing = list(channel_dir.glob(f"{msg.id}.*"))
+                if existing:
+                    counter += 1
+                    return str(existing[0])
+
+                path = await client.download_media(msg, file=str(channel_dir))
+                if path:
+                    actual_ext = Path(path).suffix
+                    final_name = f"{msg.id}{actual_ext}"
+                    final_path = channel_dir / final_name
+                    if Path(path) != final_path:
+                        Path(path).rename(final_path)
+                    counter += 1
+                    print(f"\r  [{counter}/{total}] {final_name}", file=sys.stderr, end="", flush=True)
+                    return str(final_path)
+                counter += 1
+                return None
+
+        # Launch all downloads with semaphore limiting concurrency
+        tasks = [download_one(msg) for msg in media_messages]
+        results = await asyncio.gather(*tasks)
+        saved_paths = [r for r in results if r]
+
+        print(f"\n  Done: {len(saved_paths)}/{total} files downloaded.", file=sys.stderr)
+        await client.disconnect()
+        return saved_paths
+
+    return asyncio.run(_run())
 
 
 def _load_cookies_as_dict(cookies_path: Path) -> dict:
@@ -319,6 +423,12 @@ def download_media(url: str) -> list[str]:
     platform = detect_platform(url)
 
     DOWNLOADS_DIR.mkdir(exist_ok=True)
+
+    # Telegram full channel download has its own flow (parallel, direct to downloads/)
+    if platform == "telegram":
+        _, message_id = parse_telegram_url(url)
+        if message_id is None:
+            return _download_telegram_channel(url)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         if platform == "twitter":

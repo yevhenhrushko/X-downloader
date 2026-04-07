@@ -817,7 +817,8 @@ def _check_duplicate(platform: str, username: str, media_id: str, output_dir: Pa
 
 def _check_disk_space(min_mb: int = 500) -> None:
     """Check if there's enough free disk space. Raises DownloadError if not."""
-    usage = shutil.disk_usage(DOWNLOADS_DIR)
+    check_path = DOWNLOADS_DIR if DOWNLOADS_DIR.exists() else SCRIPT_DIR
+    usage = shutil.disk_usage(check_path)
     free_mb = usage.free / (1024 * 1024)
     if free_mb < min_mb:
         raise DownloadError(f"Not enough disk space: {free_mb:.0f} MB free, need at least {min_mb} MB.")

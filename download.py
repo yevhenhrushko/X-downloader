@@ -391,7 +391,7 @@ def extract_youtube_info(url: str) -> dict:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
-                return {}
+                raise DownloadError("Could not fetch video info. Video may be private, deleted, or region-locked.")
             result = {
                 "title": info.get("title", "Unknown"),
                 "channel": info.get("uploader") or info.get("channel") or "Unknown",
@@ -400,11 +400,15 @@ def extract_youtube_info(url: str) -> dict:
             }
             # Playlist info
             if info.get("_type") == "playlist":
-                entries = info.get("entries")
-                result["playlist_count"] = info.get("playlist_count") or (len(list(entries)) if entries else 0)
+                result["playlist_count"] = info.get("playlist_count") or "unknown"
                 result["title"] = info.get("title", "Playlist")
             return result
+    except DownloadError:
+        raise
     except Exception as e:
+        msg = str(e)
+        if "Sign in" in msg or "cookies" in msg.lower():
+            raise DownloadError("YouTube requires authentication. Place youtube_cookies.txt on the server.") from e
         raise DownloadError(f"Failed to extract YouTube info: {e}") from e
 
 
@@ -467,11 +471,17 @@ def _download_youtube(url: str, tmpdir: str, mp3: bool = False, progress_callbac
             channel = re.sub(r'[^\w\-.]', '_', channel)
             return channel, video_id
     except Exception as e:
+        msg = str(e)
+        if "Sign in" in msg or "cookies" in msg.lower():
+            raise DownloadError("YouTube requires authentication. Place youtube_cookies.txt on the server.") from e
         raise DownloadError(f"YouTube download failed: {e}") from e
 
 
-def _download_youtube_playlist(url: str, tmpdir: str, mp3: bool = False, progress_callback=None) -> list[tuple[str, str]]:
-    """Download all videos from a YouTube playlist. Returns list of (channel, video_id)."""
+def _download_youtube_playlist(url: str, tmpdir: str, mp3: bool = False, progress_callback=None) -> tuple[list[tuple[int, str, str]], int]:
+    """Download all videos from a YouTube playlist.
+
+    Returns (results, skipped_count) where results is list of (original_index, channel, video_id).
+    """
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -495,29 +505,31 @@ def _download_youtube_playlist(url: str, tmpdir: str, mp3: bool = False, progres
     entries = list(info["entries"])
     total = len(entries)
     results = []
+    skipped = 0
 
     for i, entry in enumerate(entries):
         video_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
 
-        def _playlist_progress(phase, pct):
+        def _playlist_progress(phase, pct, _i=i):
             if progress_callback:
-                overall = int((i * 100 + pct) / total)
+                overall = int((_i * 100 + pct) / total)
                 progress_callback(phase, overall)
 
         try:
             video_tmpdir = os.path.join(tmpdir, f"video_{i}")
             os.makedirs(video_tmpdir, exist_ok=True)
             channel, vid_id = _download_youtube(video_url, video_tmpdir, mp3=mp3, progress_callback=_playlist_progress)
-            results.append((channel, vid_id))
+            results.append((i, channel, vid_id))
             if progress_callback:
                 progress_callback("download", int((i + 1) / total * 100))
         except DownloadError as e:
+            skipped += 1
             print(f"  Warning: Skipping video {i + 1}/{total}: {e}", file=sys.stderr)
 
     if not results:
         raise DownloadError("No videos could be downloaded from playlist.")
 
-    return results
+    return results, skipped
 
 
 # --- Telegram ---
@@ -916,11 +928,11 @@ def download_media(url: str, force: bool = False, mp3: bool = False, progress_ca
 def _download_youtube_playlist_media(url: str, output_dir: Path, mp3: bool = False, progress_callback=None) -> list[str]:
     """Download YouTube playlist and save all files. Returns saved paths."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        results = _download_youtube_playlist(url, tmpdir, mp3=mp3, progress_callback=progress_callback)
+        results, skipped = _download_youtube_playlist(url, tmpdir, mp3=mp3, progress_callback=progress_callback)
 
         all_saved = []
-        for channel, video_id in results:
-            video_tmpdir = os.path.join(tmpdir, f"video_{results.index((channel, video_id))}")
+        for orig_idx, channel, video_id in results:
+            video_tmpdir = os.path.join(tmpdir, f"video_{orig_idx}")
             downloaded_paths = _collect_files(video_tmpdir)
             if not mp3:
                 downloaded_paths = [_ensure_h264(p) for p in downloaded_paths]
@@ -936,6 +948,10 @@ def _download_youtube_playlist_media(url: str, output_dir: Path, mp3: bool = Fal
 
         if not all_saved:
             raise DownloadError("No files downloaded from playlist.")
+
+        if skipped and progress_callback:
+            progress_callback("info", f"Downloaded {len(results)} videos, {skipped} skipped")
+
         return all_saved
 
 

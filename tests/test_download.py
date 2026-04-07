@@ -1,6 +1,7 @@
 import pytest
 from download import (
     _check_disk_space,
+    _format_duration,
     build_filenames,
     detect_platform,
     parse_instagram_url,
@@ -196,6 +197,26 @@ class TestParseYoutubeUrl:
     def test_invalid_empty(self):
         with pytest.raises(ValueError, match="Not a valid YouTube URL"):
             parse_youtube_url("")
+
+
+class TestFormatDuration:
+    def test_zero(self):
+        assert _format_duration(0) == "unknown"
+
+    def test_none(self):
+        assert _format_duration(None) == "unknown"
+
+    def test_seconds_only(self):
+        assert _format_duration(30) == "0:30"
+
+    def test_minutes_and_seconds(self):
+        assert _format_duration(65) == "1:05"
+
+    def test_hours(self):
+        assert _format_duration(3661) == "1:01:01"
+
+    def test_exact_minute(self):
+        assert _format_duration(60) == "1:00"
 
 
 class TestDiskSpaceCheck:

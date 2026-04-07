@@ -14,6 +14,7 @@ services:
       - nginx-files:/var/www/downloads
       - ./x_cookies.txt:/app/x_cookies.txt
       - ./www.instagram.com_cookies.txt:/app/www.instagram.com_cookies.txt
+      - ./youtube_cookies.txt:/app/youtube_cookies.txt
       - ./telegram.session:/app/telegram.session
 
   nginx:

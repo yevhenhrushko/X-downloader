@@ -147,6 +147,8 @@ async def _run_download(update: Update, status_msg, url: str, mp3: bool = False)
             progress_state["msg"] = f"Downloading... {pct}%"
         elif phase == "convert":
             progress_state["msg"] = f"Converting video... {pct}%"
+        elif phase == "info":
+            progress_state["msg"] = str(pct)
 
     async def _update_progress():
         last_msg = ""
@@ -204,13 +206,22 @@ async def _handle_youtube_url(update: Update, context, url: str) -> None:
         ]
     ])
 
-    await _safe_edit(status_msg, meta_text)
-    await status_msg.edit_reply_markup(reply_markup=keyboard)
+    try:
+        await status_msg.edit_text(meta_text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Failed to show YouTube options: {e}")
+        context.bot_data.pop(msg_key, None)
+        await _safe_edit(status_msg, "Failed to show download options. Send the URL again.")
 
 
 async def handle_youtube_callback(update: Update, context) -> None:
     """Handle Video/MP3 button press for YouTube downloads."""
     query = update.callback_query
+
+    if not await _is_allowed(update):
+        await query.answer("Access restricted.", show_alert=True)
+        return
+
     await query.answer()
 
     data = query.data
@@ -219,6 +230,8 @@ async def handle_youtube_callback(update: Update, context) -> None:
 
     parts = data.split(":", 2)
     if len(parts) != 3:
+        logger.warning(f"Malformed YouTube callback data: {data}")
+        await query.edit_message_text("Something went wrong. Please send the URL again.")
         return
 
     _, format_choice, msg_id = parts
@@ -232,7 +245,10 @@ async def handle_youtube_callback(update: Update, context) -> None:
         return
 
     # Remove the keyboard
-    await query.edit_message_reply_markup(reply_markup=None)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        logger.warning(f"Failed to remove keyboard: {e}")
 
     format_label = "MP3" if mp3 else "video"
     status_msg = query.message

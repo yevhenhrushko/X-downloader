@@ -85,6 +85,32 @@ async def start_command(update: Update, context) -> None:
     )
 
 
+async def clean_command(update: Update, context) -> None:
+    """Handle /clean — delete all downloaded files."""
+    if not await _is_allowed(update):
+        await update.message.reply_text("Access restricted.")
+        return
+
+    deleted = 0
+    freed = 0
+    for directory in [DOWNLOADS_DIR, NGINX_DIR]:
+        if not directory.exists():
+            continue
+        for root, dirs, files in os.walk(directory):
+            for f in files:
+                path = os.path.join(root, f)
+                try:
+                    freed += os.path.getsize(path)
+                    os.remove(path)
+                    deleted += 1
+                except OSError:
+                    pass
+
+    freed_mb = freed / (1024 * 1024)
+    await update.message.reply_text(f"Cleaned {deleted} files ({freed_mb:.1f} MB freed).")
+    logger.info(f"Manual cleanup by user {update.effective_user.id}: {deleted} files, {freed_mb:.1f} MB")
+
+
 async def handle_url(update: Update, context) -> None:
     """Handle incoming URLs — download and send media."""
     if not await _is_allowed(update):
@@ -440,6 +466,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("clean", clean_command))
     app.add_handler(CallbackQueryHandler(handle_youtube_callback, pattern=r"^yt:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
 

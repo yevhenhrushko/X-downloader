@@ -16,7 +16,8 @@ ADS=(
   "Dvah:EU-FRANKFURT-1-AD-3"
 )
 
-LOG="/home/ubuntu/wait_for_instance.log"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG="$SCRIPT_DIR/../wait_for_instance.log"
 
 echo "$(date): Starting instance availability daemon" | tee -a "$LOG"
 echo "Shape: $SHAPE (2 OCPUs, 12 GB RAM)" | tee -a "$LOG"

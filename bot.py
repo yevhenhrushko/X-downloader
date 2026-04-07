@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Telegram bot for downloading media from X/Twitter, Instagram, and Telegram."""
+"""Telegram bot for downloading media from YouTube, X/Twitter, Instagram, and Telegram."""
 
 import asyncio
 import functools
@@ -10,21 +10,23 @@ import shutil
 from pathlib import Path
 
 from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InputMediaDocument,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ChatAction, ParseMode
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from download import (
     DownloadError,
     _download_telegram_channel,
+    _format_duration,
     detect_platform,
     download_media,
+    extract_youtube_info,
     parse_telegram_url,
+    parse_youtube_url,
     DOWNLOADS_DIR,
 )
 
@@ -43,16 +45,8 @@ SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:9090/files")
 
 URL_PATTERN = re.compile(r"https?://\S+")
 
-# Allowed users (usernames without @, and phone numbers)
-ALLOWED_USERS = {
-    "top_photographer",
-    "yevhen_hrushko",
-}
-ALLOWED_PHONES = {
-    "+380682649098",
-}
-# Cache of verified user IDs (populated at runtime)
-_verified_user_ids: set[int] = set()
+# Allowed Telegram user IDs
+ALLOWED_IDS = {2556187, 504147733, 5967132135}
 
 
 async def _safe_edit(status_msg, text: str) -> None:
@@ -68,11 +62,7 @@ async def _is_allowed(update: Update) -> bool:
     user = update.effective_user
     if not user:
         return False
-    if user.id in _verified_user_ids:
-        return True
-    if user.username and user.username.lower() in ALLOWED_USERS:
-        _verified_user_ids.add(user.id)
-        logger.info(f"Granted access to user_id={user.id} via username=@{user.username}")
+    if user.id in ALLOWED_IDS:
         return True
     logger.info(f"Access denied for user_id={user.id} username=@{user.username}")
     return False
@@ -81,78 +71,24 @@ async def _is_allowed(update: Update) -> bool:
 async def start_command(update: Update, context) -> None:
     """Handle /start command."""
     if not await _is_allowed(update):
-        await update.message.reply_text(
-            "Access restricted. Use /auth to verify via phone number."
-        )
+        await update.message.reply_text("Access restricted.")
         return
     await update.message.reply_text(
-        "Send me a URL from X/Twitter, Instagram, or Telegram.\n"
+        "Send me a URL from YouTube, X/Twitter, Instagram, or Telegram.\n"
         "I'll download the media and send it back in best quality.\n\n"
         "Supported:\n"
-        "- Single posts (image/video)\n"
+        "- YouTube videos, Shorts, playlists\n"
+        "- X/Twitter posts (image/video)\n"
+        "- Instagram posts, reels, stories\n"
         "- Telegram channels (all media)\n\n"
         "Media is sent as documents to preserve original quality."
     )
 
 
-async def auth_command(update: Update, context) -> None:
-    """Handle /auth — request phone number for verification."""
-    user = update.effective_user
-    if user and user.id in _verified_user_ids:
-        await update.message.reply_text("You're already verified.")
-        return
-    if user and user.username and user.username.lower() in ALLOWED_USERS:
-        _verified_user_ids.add(user.id)
-        logger.info(f"Granted access to user_id={user.id} via username=@{user.username}")
-        await update.message.reply_text("Verified by username. You're in!")
-        return
-
-    keyboard = ReplyKeyboardMarkup(
-        [[KeyboardButton("Share phone number", request_contact=True)]],
-        one_time_keyboard=True, resize_keyboard=True,
-    )
-    await update.message.reply_text(
-        "Please share your phone number to verify access.",
-        reply_markup=keyboard,
-    )
-
-
-async def handle_contact(update: Update, context) -> None:
-    """Handle shared contact for phone verification."""
-    contact = update.message.contact
-    if not contact:
-        return
-
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text(
-            "Could not verify. Please try again.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
-    phone = contact.phone_number
-    if not phone.startswith("+"):
-        phone = f"+{phone}"
-
-    if phone in ALLOWED_PHONES:
-        _verified_user_ids.add(user.id)
-        await update.message.reply_text(
-            "Verified! You can now send URLs.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        logger.info(f"Granted access to user_id={user.id} via phone {phone}")
-    else:
-        await update.message.reply_text(
-            "Phone number not authorized.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-
-
 async def handle_url(update: Update, context) -> None:
     """Handle incoming URLs — download and send media."""
     if not await _is_allowed(update):
-        await update.message.reply_text("Access restricted. Use /auth to verify.")
+        await update.message.reply_text("Access restricted.")
         return
     text = update.message.text.strip()
     urls = URL_PATTERN.findall(text)
@@ -161,15 +97,20 @@ async def handle_url(update: Update, context) -> None:
         return
 
     for url in urls:
-        await _process_url(update, url)
+        await _process_url(update, context, url)
 
 
-async def _process_url(update: Update, url: str) -> None:
+async def _process_url(update: Update, context, url: str, mp3: bool = False) -> None:
     """Download media from URL and send back to user."""
     try:
         platform = detect_platform(url)
     except ValueError as e:
         await update.message.reply_text(f"Unsupported URL: {e}")
+        return
+
+    # YouTube: show metadata and offer format choice
+    if platform == "youtube" and not mp3:
+        await _handle_youtube_url(update, context, url)
         return
 
     await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
@@ -188,39 +129,121 @@ async def _process_url(update: Update, url: str) -> None:
         if is_channel:
             await _handle_channel_download(update, status_msg, url)
         else:
-            # Run download in executor with progress updates
-            progress_state = {"msg": "", "active": True}
-
-            def _on_progress(phase, pct):
-                if phase == "download":
-                    progress_state["msg"] = f"Downloading... {pct}%"
-                elif phase == "convert":
-                    progress_state["msg"] = f"Converting video... {pct}%"
-
-            async def _update_progress():
-                last_msg = ""
-                while progress_state["active"]:
-                    await asyncio.sleep(2)
-                    msg = progress_state["msg"]
-                    if msg and msg != last_msg:
-                        await _safe_edit(status_msg, msg)
-                        last_msg = msg
-
-            progress_task = asyncio.create_task(_update_progress())
-            try:
-                saved = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: download_media(url, force=True, progress_callback=_on_progress)
-                )
-            finally:
-                progress_state["active"] = False
-                progress_task.cancel()
-
-            await _send_files(update, status_msg, saved)
+            await _run_download(update, status_msg, url, mp3=mp3)
 
     except DownloadError as e:
         await _safe_edit(status_msg, f"Download failed: {e}")
     except Exception as e:
         logger.exception(f"Unexpected error for {url}")
+        await _safe_edit(status_msg, "An unexpected error occurred. Check bot logs.")
+
+
+async def _run_download(update: Update, status_msg, url: str, mp3: bool = False) -> None:
+    """Run download with progress updates and send files."""
+    progress_state = {"msg": "", "active": True}
+
+    def _on_progress(phase, pct):
+        if phase == "download":
+            progress_state["msg"] = f"Downloading... {pct}%"
+        elif phase == "convert":
+            progress_state["msg"] = f"Converting video... {pct}%"
+
+    async def _update_progress():
+        last_msg = ""
+        while progress_state["active"]:
+            await asyncio.sleep(2)
+            msg = progress_state["msg"]
+            if msg and msg != last_msg:
+                await _safe_edit(status_msg, msg)
+                last_msg = msg
+
+    progress_task = asyncio.create_task(_update_progress())
+    try:
+        saved = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: download_media(url, force=True, mp3=mp3, progress_callback=_on_progress)
+        )
+    finally:
+        progress_state["active"] = False
+        progress_task.cancel()
+
+    await _send_files(update, status_msg, saved)
+
+
+async def _handle_youtube_url(update: Update, context, url: str) -> None:
+    """Handle YouTube URL: show metadata and format selection keyboard."""
+    status_msg = await update.message.reply_text("Fetching video info...")
+
+    try:
+        info = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: extract_youtube_info(url)
+        )
+    except DownloadError as e:
+        await _safe_edit(status_msg, f"Failed: {e}")
+        return
+
+    title = info.get("title", "Unknown")
+    channel = info.get("channel", "Unknown")
+    duration = _format_duration(info.get("duration", 0))
+    playlist_count = info.get("playlist_count")
+
+    if playlist_count:
+        meta_text = f"Playlist: {title}\nChannel: {channel}\nVideos: {playlist_count}"
+    else:
+        views = info.get("view_count")
+        views_str = f"\nViews: {views:,}" if views else ""
+        meta_text = f"{title}\nChannel: {channel}\nDuration: {duration}{views_str}"
+
+    # Store URL in bot_data keyed by message ID (callback_data has 64-byte limit)
+    msg_key = f"yt_{status_msg.message_id}"
+    context.bot_data[msg_key] = url
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Video", callback_data=f"yt:video:{status_msg.message_id}"),
+            InlineKeyboardButton("MP3", callback_data=f"yt:mp3:{status_msg.message_id}"),
+        ]
+    ])
+
+    await _safe_edit(status_msg, meta_text)
+    await status_msg.edit_reply_markup(reply_markup=keyboard)
+
+
+async def handle_youtube_callback(update: Update, context) -> None:
+    """Handle Video/MP3 button press for YouTube downloads."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("yt:"):
+        return
+
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        return
+
+    _, format_choice, msg_id = parts
+    mp3 = format_choice == "mp3"
+
+    # Retrieve URL from bot_data
+    msg_key = f"yt_{msg_id}"
+    url = context.bot_data.pop(msg_key, None)
+    if not url:
+        await query.edit_message_text("Session expired. Please send the URL again.")
+        return
+
+    # Remove the keyboard
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    format_label = "MP3" if mp3 else "video"
+    status_msg = query.message
+    await _safe_edit(status_msg, f"Downloading {format_label}...")
+
+    try:
+        await _run_download(update, status_msg, url, mp3=mp3)
+    except DownloadError as e:
+        await _safe_edit(status_msg, f"Download failed: {e}")
+    except Exception as e:
+        logger.exception(f"Unexpected error for YouTube {url}")
         await _safe_edit(status_msg, "An unexpected error occurred. Check bot logs.")
 
 
@@ -395,8 +418,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("auth", auth_command))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    app.add_handler(CallbackQueryHandler(handle_youtube_callback, pattern=r"^yt:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
 
     logger.info("Bot started. Waiting for messages...")

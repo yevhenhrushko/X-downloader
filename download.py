@@ -22,6 +22,7 @@ COOKIES_FILES = {
     "twitter": SCRIPT_DIR / "x_cookies.txt",
     "instagram": SCRIPT_DIR / "www.instagram.com_cookies.txt",
     "telegram": SCRIPT_DIR / "web.telegram.org_cookies.txt",
+    "youtube": SCRIPT_DIR / "youtube_cookies.txt",
 }
 GALLERY_DL = shutil.which("gallery-dl") or str(SCRIPT_DIR / "venv" / "bin" / "gallery-dl")
 
@@ -45,6 +46,8 @@ def detect_platform(url: str) -> str:
         return "instagram"
     if domain in ("t.me", "web.telegram.org"):
         return "telegram"
+    if domain in ("youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"):
+        return "youtube"
     raise ValueError(f"Unsupported platform: {domain}")
 
 
@@ -120,6 +123,51 @@ def parse_telegram_url(url: str) -> tuple[str, str | None]:
         return match.group(1), None
 
     raise ValueError(f"Not a valid Telegram URL: {url}")
+
+
+def parse_youtube_url(url: str) -> tuple[str, str | None]:
+    """Extract (video_id, playlist_id_or_none) from a YouTube URL.
+
+    Supports: /watch?v=, /shorts/, youtu.be/, /playlist?list=, /live/
+    Returns (video_id, None) for single videos, ("", playlist_id) for playlists.
+    Raises ValueError if URL doesn't match expected pattern.
+    """
+    from urllib.parse import parse_qs
+
+    url = url.strip().rstrip("/")
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower().removeprefix("www.").removeprefix("m.")
+    query = parse_qs(parsed.query)
+
+    # Playlist-only URL: youtube.com/playlist?list=PLxxx
+    if parsed.path == "/playlist" and "list" in query:
+        return "", query["list"][0]
+
+    # youtu.be/VIDEO_ID
+    if domain == "youtu.be":
+        video_id = parsed.path.lstrip("/").split("/")[0]
+        if not video_id:
+            raise ValueError(f"Not a valid YouTube URL: {url}")
+        playlist_id = query.get("list", [None])[0]
+        return video_id, playlist_id
+
+    # /shorts/VIDEO_ID
+    match = re.match(r"/shorts/([A-Za-z0-9_-]{11})", parsed.path)
+    if match:
+        return match.group(1), None
+
+    # /live/VIDEO_ID
+    match = re.match(r"/live/([A-Za-z0-9_-]{11})", parsed.path)
+    if match:
+        return match.group(1), query.get("list", [None])[0]
+
+    # /watch?v=VIDEO_ID
+    if "v" in query:
+        video_id = query["v"][0]
+        playlist_id = query.get("list", [None])[0]
+        return video_id, playlist_id
+
+    raise ValueError(f"Not a valid YouTube URL: {url}")
 
 
 def build_filenames(username: str, media_id: str, original_files: list[str]) -> dict[str, str]:
@@ -320,6 +368,156 @@ def _download_instagram(url: str, tmpdir: str) -> tuple[str, str]:
                     break
 
     return username, shortcode
+
+
+# --- YouTube ---
+
+
+def extract_youtube_info(url: str) -> dict:
+    """Extract YouTube video/playlist metadata without downloading.
+
+    Returns dict with: title, channel, duration, view_count, playlist_count, etc.
+    """
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "ignore_no_formats_error": True,
+    }
+    cookies = _get_cookies("youtube")
+    if cookies:
+        ydl_opts["cookiefile"] = str(cookies)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return {}
+            result = {
+                "title": info.get("title", "Unknown"),
+                "channel": info.get("uploader") or info.get("channel") or "Unknown",
+                "duration": info.get("duration", 0),
+                "view_count": info.get("view_count"),
+            }
+            # Playlist info
+            if info.get("_type") == "playlist":
+                entries = info.get("entries")
+                result["playlist_count"] = info.get("playlist_count") or (len(list(entries)) if entries else 0)
+                result["title"] = info.get("title", "Playlist")
+            return result
+    except Exception as e:
+        raise DownloadError(f"Failed to extract YouTube info: {e}") from e
+
+
+def _format_duration(seconds: int) -> str:
+    """Format seconds to human-readable duration."""
+    if not seconds:
+        return "unknown"
+    h, remainder = divmod(int(seconds), 3600)
+    m, s = divmod(remainder, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _download_youtube(url: str, tmpdir: str, mp3: bool = False, progress_callback=None) -> tuple[str, str]:
+    """Download a single YouTube video. Returns (channel, video_id)."""
+    video_id, _ = parse_youtube_url(url)
+    if not video_id:
+        raise DownloadError("Cannot download: URL is a playlist, not a single video.")
+
+    def _progress_hook(d):
+        if d['status'] == 'downloading' and progress_callback:
+            pct_str = d.get('_percent_str', '').strip().rstrip('%')
+            try:
+                progress_callback("download", int(float(pct_str)))
+            except (ValueError, TypeError):
+                pass
+
+    if mp3:
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "320",
+            }],
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [_progress_hook],
+        }
+    else:
+        ydl_opts = {
+            "format": "bestvideo+bestaudio/best",
+            "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [_progress_hook],
+        }
+
+    cookies = _get_cookies("youtube")
+    if cookies:
+        ydl_opts["cookiefile"] = str(cookies)
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            channel = info.get("uploader") or info.get("channel") or "unknown"
+            channel = re.sub(r'[^\w\-.]', '_', channel)
+            return channel, video_id
+    except Exception as e:
+        raise DownloadError(f"YouTube download failed: {e}") from e
+
+
+def _download_youtube_playlist(url: str, tmpdir: str, mp3: bool = False, progress_callback=None) -> list[tuple[str, str]]:
+    """Download all videos from a YouTube playlist. Returns list of (channel, video_id)."""
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": True,
+    }
+    cookies = _get_cookies("youtube")
+    if cookies:
+        ydl_opts["cookiefile"] = str(cookies)
+
+    # First pass: get list of video URLs
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        raise DownloadError(f"Failed to read playlist: {e}") from e
+
+    if not info or not info.get("entries"):
+        raise DownloadError("Playlist is empty or unavailable.")
+
+    entries = list(info["entries"])
+    total = len(entries)
+    results = []
+
+    for i, entry in enumerate(entries):
+        video_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
+
+        def _playlist_progress(phase, pct):
+            if progress_callback:
+                overall = int((i * 100 + pct) / total)
+                progress_callback(phase, overall)
+
+        try:
+            video_tmpdir = os.path.join(tmpdir, f"video_{i}")
+            os.makedirs(video_tmpdir, exist_ok=True)
+            channel, vid_id = _download_youtube(video_url, video_tmpdir, mp3=mp3, progress_callback=_playlist_progress)
+            results.append((channel, vid_id))
+            if progress_callback:
+                progress_callback("download", int((i + 1) / total * 100))
+        except DownloadError as e:
+            print(f"  Warning: Skipping video {i + 1}/{total}: {e}", file=sys.stderr)
+
+    if not results:
+        raise DownloadError("No videos could be downloaded from playlist.")
+
+    return results
 
 
 # --- Telegram ---
@@ -617,17 +815,33 @@ def _check_duplicate(platform: str, username: str, media_id: str, output_dir: Pa
     return None
 
 
-def download_media(url: str, force: bool = False, progress_callback=None) -> list[str]:
+def _check_disk_space(min_mb: int = 500) -> None:
+    """Check if there's enough free disk space. Raises DownloadError if not."""
+    usage = shutil.disk_usage(DOWNLOADS_DIR)
+    free_mb = usage.free / (1024 * 1024)
+    if free_mb < min_mb:
+        raise DownloadError(f"Not enough disk space: {free_mb:.0f} MB free, need at least {min_mb} MB.")
+
+
+def download_media(url: str, force: bool = False, mp3: bool = False, progress_callback=None) -> list[str]:
     """Download all media from a URL. Returns list of saved file paths."""
     platform = detect_platform(url)
     output_dir = DOWNLOADS_DIR / platform
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    _check_disk_space()
 
     # Telegram full channel download has its own flow
     if platform == "telegram":
         _, message_id = parse_telegram_url(url)
         if message_id is None:
             return _download_telegram_channel(url, DOWNLOADS_DIR / "telegram")
+
+    # YouTube playlist has its own flow
+    if platform == "youtube":
+        video_id, playlist_id = parse_youtube_url(url)
+        if playlist_id and not video_id:
+            return _download_youtube_playlist_media(url, output_dir, mp3=mp3, progress_callback=progress_callback)
 
     # Early duplicate check (before downloading)
     if not force:
@@ -636,7 +850,6 @@ def download_media(url: str, force: bool = False, progress_callback=None) -> lis
                 url_username, tweet_id = parse_tweet_url(url)
                 existing = _check_duplicate(platform, url_username, tweet_id, output_dir)
                 if not existing:
-                    # Also check with 'i' since we might not know the real username yet
                     pass  # proceed to download
                 else:
                     print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
@@ -656,6 +869,13 @@ def download_media(url: str, force: bool = False, progress_callback=None) -> lis
                     print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
                     print("Use --force to re-download.", file=sys.stderr)
                     return existing
+            elif platform == "youtube":
+                video_id, _ = parse_youtube_url(url)
+                existing = _check_duplicate(platform, "*", video_id, output_dir)
+                if existing:
+                    print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
+                    print("Use --force to re-download.", file=sys.stderr)
+                    return existing
         except ValueError:
             pass  # URL parsing failed, let download handle the error
 
@@ -666,12 +886,15 @@ def download_media(url: str, force: bool = False, progress_callback=None) -> lis
             username, media_id = _download_instagram(url, tmpdir)
         elif platform == "telegram":
             username, media_id = _download_telegram(url, tmpdir)
+        elif platform == "youtube":
+            username, media_id = _download_youtube(url, tmpdir, mp3=mp3, progress_callback=progress_callback)
         else:
             raise DownloadError(f"No download handler for platform: {platform}")
 
-        # Collect all downloaded files and ensure video compatibility
+        # Collect all downloaded files and ensure video compatibility (skip for mp3)
         downloaded_paths = _collect_files(tmpdir)
-        downloaded_paths = [_ensure_h264(p, progress_callback=progress_callback) for p in downloaded_paths]
+        if not mp3:
+            downloaded_paths = [_ensure_h264(p, progress_callback=progress_callback) for p in downloaded_paths]
         if not downloaded_paths:
             raise DownloadError("No media files were downloaded.")
 
@@ -687,6 +910,32 @@ def download_media(url: str, force: bool = False, progress_callback=None) -> lis
             saved_paths.append(str(dst))
 
     return saved_paths
+
+
+def _download_youtube_playlist_media(url: str, output_dir: Path, mp3: bool = False, progress_callback=None) -> list[str]:
+    """Download YouTube playlist and save all files. Returns saved paths."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results = _download_youtube_playlist(url, tmpdir, mp3=mp3, progress_callback=progress_callback)
+
+        all_saved = []
+        for channel, video_id in results:
+            video_tmpdir = os.path.join(tmpdir, f"video_{results.index((channel, video_id))}")
+            downloaded_paths = _collect_files(video_tmpdir)
+            if not mp3:
+                downloaded_paths = [_ensure_h264(p) for p in downloaded_paths]
+
+            downloaded_names = [os.path.basename(p) for p in downloaded_paths]
+            name_map = build_filenames(channel, video_id, downloaded_names)
+
+            for full_path, orig_name in zip(downloaded_paths, downloaded_names):
+                new_name = name_map[orig_name]
+                dst = output_dir / new_name
+                shutil.move(full_path, dst)
+                all_saved.append(str(dst))
+
+        if not all_saved:
+            raise DownloadError("No files downloaded from playlist.")
+        return all_saved
 
 
 def _get_clipboard_url() -> str:
@@ -708,6 +957,7 @@ def main():
     parser.add_argument("-c", "--clipboard", action="store_true", help="Read URL from clipboard")
     parser.add_argument("-f", "--file", type=str, help="Read URLs from file (one per line)")
     parser.add_argument("--force", action="store_true", help="Re-download even if file exists")
+    parser.add_argument("--mp3", action="store_true", help="Extract audio only as MP3 (YouTube)")
     parser.add_argument("--check", action="store_true", help="Check cookie health and exit")
 
     args = parser.parse_args()
@@ -762,7 +1012,7 @@ def main():
             continue
 
         try:
-            saved = download_media(url, force=args.force)
+            saved = download_media(url, force=args.force, mp3=args.mp3)
             all_saved.extend(saved)
             succeeded += 1
         except DownloadError as e:

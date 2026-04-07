@@ -1,10 +1,12 @@
 import pytest
 from download import (
+    _check_disk_space,
     build_filenames,
     detect_platform,
     parse_instagram_url,
     parse_telegram_url,
     parse_tweet_url,
+    parse_youtube_url,
 )
 
 
@@ -30,9 +32,21 @@ class TestDetectPlatform:
     def test_web_telegram(self):
         assert detect_platform("https://web.telegram.org/a/#-1002899724101") == "telegram"
 
+    def test_youtube(self):
+        assert detect_platform("https://www.youtube.com/watch?v=abc123") == "youtube"
+
+    def test_youtu_be(self):
+        assert detect_platform("https://youtu.be/abc123") == "youtube"
+
+    def test_youtube_mobile(self):
+        assert detect_platform("https://m.youtube.com/watch?v=abc123") == "youtube"
+
+    def test_youtube_music(self):
+        assert detect_platform("https://music.youtube.com/watch?v=abc123") == "youtube"
+
     def test_unsupported(self):
         with pytest.raises(ValueError, match="Unsupported platform"):
-            detect_platform("https://youtube.com/watch?v=123")
+            detect_platform("https://vimeo.com/123456")
 
     def test_empty(self):
         with pytest.raises(ValueError):
@@ -139,3 +153,57 @@ class TestBuildFilenames:
 
     def test_preserves_extension(self):
         assert build_filenames("user", "1", ["file.webm"]) == {"file.webm": "@user_1.webm"}
+
+
+class TestParseYoutubeUrl:
+    def test_standard_watch(self):
+        assert parse_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == ("dQw4w9WgXcQ", None)
+
+    def test_short_url(self):
+        assert parse_youtube_url("https://youtu.be/dQw4w9WgXcQ") == ("dQw4w9WgXcQ", None)
+
+    def test_shorts(self):
+        vid, pl = parse_youtube_url("https://www.youtube.com/shorts/dQw4w9WgXcQ")
+        assert vid == "dQw4w9WgXcQ"
+        assert pl is None
+
+    def test_playlist_only(self):
+        vid, pl = parse_youtube_url("https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
+        assert vid == ""
+        assert pl == "PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+
+    def test_video_in_playlist(self):
+        vid, pl = parse_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
+        assert vid == "dQw4w9WgXcQ"
+        assert pl == "PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+
+    def test_live(self):
+        vid, pl = parse_youtube_url("https://www.youtube.com/live/dQw4w9WgXcQ")
+        assert vid == "dQw4w9WgXcQ"
+
+    def test_mobile(self):
+        assert parse_youtube_url("https://m.youtube.com/watch?v=dQw4w9WgXcQ") == ("dQw4w9WgXcQ", None)
+
+    def test_youtu_be_with_playlist(self):
+        vid, pl = parse_youtube_url("https://youtu.be/dQw4w9WgXcQ?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
+        assert vid == "dQw4w9WgXcQ"
+        assert pl == "PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+
+    def test_invalid(self):
+        with pytest.raises(ValueError, match="Not a valid YouTube URL"):
+            parse_youtube_url("https://www.youtube.com/channel/UCxxxx")
+
+    def test_invalid_empty(self):
+        with pytest.raises(ValueError, match="Not a valid YouTube URL"):
+            parse_youtube_url("")
+
+
+class TestDiskSpaceCheck:
+    def test_enough_space(self):
+        # Should not raise — the dev machine always has >500MB
+        _check_disk_space(min_mb=1)
+
+    def test_not_enough_space(self):
+        from download import DownloadError
+        with pytest.raises(DownloadError, match="Not enough disk space"):
+            _check_disk_space(min_mb=999_999_999)

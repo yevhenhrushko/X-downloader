@@ -1,6 +1,6 @@
 # Telegram Downloader Bot
 
-CLI tool and Telegram bot for downloading media from X (Twitter), Instagram, and Telegram in best quality.
+CLI tool and Telegram bot for downloading media from YouTube, X (Twitter), Instagram, and Telegram in best quality.
 
 ## CLI Setup (local use)
 
@@ -16,6 +16,7 @@ Export cookies from your browser using a cookie extension (e.g., "Get cookies.tx
 
 - `x_cookies.txt` — X/Twitter
 - `www.instagram.com_cookies.txt` — Instagram
+- `youtube_cookies.txt` — YouTube (optional, for age-restricted/members content)
 
 ### Telegram Setup
 
@@ -39,11 +40,19 @@ Enter your phone number and the code Telegram sends you. Creates `telegram.sessi
 ./download -c                             # Download from clipboard
 ./download -f urls.txt                    # Download from file
 ./download --force <url>                  # Re-download even if exists
+./download --mp3 <url>                    # Audio only as MP3 (YouTube)
 ```
 
 ## CLI Examples
 
 ```bash
+# YouTube
+./download "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+./download "https://youtu.be/dQw4w9WgXcQ"
+./download "https://www.youtube.com/shorts/VIDEO_ID"
+./download "https://www.youtube.com/playlist?list=PLxxxxx"
+./download --mp3 "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
 # X/Twitter
 ./download "https://x.com/user/status/1234567890"
 
@@ -69,10 +78,13 @@ Send any URL to the bot — it downloads media and sends it back as documents (n
 
 ### Bot Features
 
-- Send URL -> get media back as documents (original quality)
+- YouTube: shows video info (title, channel, duration, views), choose Video or MP3
+- YouTube playlists and Shorts supported
 - Multiple files grouped into albums (max 10 per album)
 - Files > 50MB served as download links via nginx
 - Full Telegram channel download supported
+- Download progress with percentage
+- Disk space check before downloading
 - Auto-cleanup: all files deleted after 24 hours
 
 ### Bot Deployment (Docker)
@@ -98,18 +110,20 @@ docker-compose up -d
 ### Docker Services
 
 - **bot** — Python app running bot.py with download.py
-- **nginx** — Serves large files (>50MB) on port 8080
+- **nginx** — Serves large files (>50MB) on port 9090
 
 ### Required Files (mount as volumes)
 
 - `x_cookies.txt` — X/Twitter cookies
 - `www.instagram.com_cookies.txt` — Instagram cookies
+- `youtube_cookies.txt` — YouTube cookies (optional)
 - `telegram.session` — Telegram session (run setup_telegram.py locally first)
 
 ## Output Structure
 
 ```
 downloads/
+  youtube/        @channel_ID.ext
   twitter/        @username_ID.ext
   instagram/      @username_ID.ext
   telegram/
@@ -118,11 +132,12 @@ downloads/
 
 ## Supported Platforms
 
-| Platform | Images | Video | Full Channel | Auth |
-|----------|--------|-------|-------------|------|
-| X/Twitter | yes | yes | no | Optional (NSFW/private) |
-| Instagram | yes | yes | no | Recommended |
-| Telegram | yes | yes | yes (10 threads) | Required (Telegram API) |
+| Platform | Images | Video | Audio (MP3) | Shorts | Playlist | Full Channel | Auth |
+|----------|--------|-------|-------------|--------|----------|-------------|------|
+| YouTube | no | yes | yes | yes | yes | no | Optional (age-restricted) |
+| X/Twitter | yes | yes | no | no | no | no | Optional (NSFW/private) |
+| Instagram | yes | yes | no | no | no | no | Recommended |
+| Telegram | yes | yes | no | no | no | yes (10 threads) | Required (Telegram API) |
 
 ## Dependencies
 

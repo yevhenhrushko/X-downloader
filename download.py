@@ -374,13 +374,14 @@ def _download_instagram(url: str, tmpdir: str) -> tuple[str, str]:
 
 
 def _youtube_ydl_opts() -> dict:
-    """Common yt-dlp options for YouTube (cookies + JS runtime)."""
-    opts = {}
+    """Common yt-dlp options for YouTube (cookies + JS runtime + EJS solver)."""
+    opts = {
+        "js_runtimes": {"deno": {"path": None}, "node": {"path": None}},
+        "remote_components": ["ejs:github"],
+    }
     cookies = _get_cookies("youtube")
     if cookies:
         opts["cookiefile"] = str(cookies)
-    if shutil.which("node"):
-        opts["extractor_args"] = {"youtube": {"js_runtimes": ["nodejs"]}}
     return opts
 
 

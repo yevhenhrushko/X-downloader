@@ -49,7 +49,7 @@ jobs:
               cd "$DEPLOY_DIR" 2>/dev/null || mkdir -p "$DEPLOY_DIR"
               cd "$DEPLOY_DIR"
               git init
-              git remote add origin https://github.com/yevhenhrushko/X-downloader.git
+              git remote add origin https://github.com/yevhenhrushko/telegram-downloader-bot.git
             fi
             cd "$DEPLOY_DIR"
             git fetch origin master

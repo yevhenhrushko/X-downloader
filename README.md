@@ -1,11 +1,11 @@
-# X-Downloader
+# Telegram Downloader Bot
 
 CLI tool and Telegram bot for downloading media from X (Twitter), Instagram, and Telegram in best quality.
 
 ## CLI Setup (local use)
 
 ```bash
-cd X-downloader
+cd telegram-downloader-bot
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```

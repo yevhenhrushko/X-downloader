@@ -19,6 +19,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from download import (
+    COOKIES_FILES,
     DownloadError,
     _download_telegram_channel,
     _format_duration,
@@ -458,6 +459,34 @@ def _serve_large_file(filepath: str) -> str | None:
     return f"{SERVER_URL}/{filename}"
 
 
+# Map filenames users might send to the expected cookie file paths
+_COOKIE_FILENAME_MAP = {}
+for _platform, _path in COOKIES_FILES.items():
+    _COOKIE_FILENAME_MAP[_path.name] = _path
+
+
+async def handle_cookie_file(update: Update, context) -> None:
+    """Handle uploaded cookie files — replace existing cookies on disk."""
+    if not await _is_allowed(update):
+        await update.message.reply_text("Access restricted.")
+        return
+
+    doc = update.message.document
+    filename = doc.file_name
+
+    target_path = _COOKIE_FILENAME_MAP.get(filename)
+    if not target_path:
+        # Not a recognized cookie file — ignore, let other handlers deal with it
+        return
+
+    tg_file = await doc.get_file()
+    await tg_file.download_to_drive(str(target_path))
+
+    platform = target_path.stem.replace("_cookies", "").replace("www.", "").replace(".com", "")
+    logger.info(f"Cookie file updated: {filename} by user {update.effective_user.id}")
+    await update.message.reply_text(f"Cookies updated for {platform}.")
+
+
 def main():
     if not BOT_TOKEN:
         print("Error: DOWNLOADER_BOT_TOKEN environment variable not set.", flush=True)
@@ -468,6 +497,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("clean", clean_command))
     app.add_handler(CallbackQueryHandler(handle_youtube_callback, pattern=r"^yt:"))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_cookie_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
 
     logger.info("Bot started. Waiting for messages...")

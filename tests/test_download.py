@@ -1,9 +1,11 @@
 import pytest
 from download import (
+    DownloadError,
     _check_disk_space,
     _format_duration,
     build_filenames,
     detect_platform,
+    download_media,
     parse_instagram_url,
     parse_telegram_url,
     parse_tweet_url,
@@ -225,6 +227,12 @@ class TestDiskSpaceCheck:
         _check_disk_space(min_mb=1)
 
     def test_not_enough_space(self):
-        from download import DownloadError
         with pytest.raises(DownloadError, match="Not enough disk space"):
             _check_disk_space(min_mb=999_999_999)
+
+
+class TestDownloadMediaErrors:
+    def test_invalid_instagram_api_url_is_download_error(self):
+        url = "https://www.instagram.com/api/v1/media/3878201540318090661/info/"
+        with pytest.raises(DownloadError, match="Not a valid Instagram URL"):
+            download_media(url, force=True)

@@ -850,87 +850,90 @@ def download_media(url: str, force: bool = False, mp3: bool = False, progress_ca
     output_dir = DOWNLOADS_DIR / platform
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _check_disk_space()
+    try:
+        _check_disk_space()
 
-    # Telegram full channel download has its own flow
-    if platform == "telegram":
-        _, message_id = parse_telegram_url(url)
-        if message_id is None:
-            return _download_telegram_channel(url, DOWNLOADS_DIR / "telegram")
+        # Telegram full channel download has its own flow
+        if platform == "telegram":
+            _, message_id = parse_telegram_url(url)
+            if message_id is None:
+                return _download_telegram_channel(url, DOWNLOADS_DIR / "telegram")
 
-    # YouTube playlist has its own flow
-    if platform == "youtube":
-        video_id, playlist_id = parse_youtube_url(url)
-        if playlist_id and not video_id:
-            return _download_youtube_playlist_media(url, output_dir, mp3=mp3, progress_callback=progress_callback)
+        # YouTube playlist has its own flow
+        if platform == "youtube":
+            video_id, playlist_id = parse_youtube_url(url)
+            if playlist_id and not video_id:
+                return _download_youtube_playlist_media(url, output_dir, mp3=mp3, progress_callback=progress_callback)
 
-    # Early duplicate check (before downloading)
-    if not force:
-        try:
+        # Early duplicate check (before downloading)
+        if not force:
+            try:
+                if platform == "twitter":
+                    url_username, tweet_id = parse_tweet_url(url)
+                    existing = _check_duplicate(platform, url_username, tweet_id, output_dir)
+                    if not existing:
+                        pass  # proceed to download
+                    else:
+                        print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
+                        print("Use --force to re-download.", file=sys.stderr)
+                        return existing
+                elif platform == "instagram":
+                    _, shortcode = parse_instagram_url(url)
+                    existing = _check_duplicate(platform, "*", shortcode, output_dir)
+                    if existing:
+                        print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
+                        print("Use --force to re-download.", file=sys.stderr)
+                        return existing
+                elif platform == "telegram":
+                    channel, msg_id = parse_telegram_url(url)
+                    existing = _check_duplicate(platform, "*", msg_id, output_dir)
+                    if existing:
+                        print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
+                        print("Use --force to re-download.", file=sys.stderr)
+                        return existing
+                elif platform == "youtube":
+                    video_id, _ = parse_youtube_url(url)
+                    existing = _check_duplicate(platform, "*", video_id, output_dir)
+                    if existing:
+                        print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
+                        print("Use --force to re-download.", file=sys.stderr)
+                        return existing
+            except ValueError:
+                pass  # URL parsing failed, let download handle the error
+
+        with tempfile.TemporaryDirectory() as tmpdir:
             if platform == "twitter":
-                url_username, tweet_id = parse_tweet_url(url)
-                existing = _check_duplicate(platform, url_username, tweet_id, output_dir)
-                if not existing:
-                    pass  # proceed to download
-                else:
-                    print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
-                    print("Use --force to re-download.", file=sys.stderr)
-                    return existing
+                username, media_id = _download_twitter(url, tmpdir, progress_callback=progress_callback)
             elif platform == "instagram":
-                _, shortcode = parse_instagram_url(url)
-                existing = _check_duplicate(platform, "*", shortcode, output_dir)
-                if existing:
-                    print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
-                    print("Use --force to re-download.", file=sys.stderr)
-                    return existing
+                username, media_id = _download_instagram(url, tmpdir)
             elif platform == "telegram":
-                channel, msg_id = parse_telegram_url(url)
-                existing = _check_duplicate(platform, "*", msg_id, output_dir)
-                if existing:
-                    print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
-                    print("Use --force to re-download.", file=sys.stderr)
-                    return existing
+                username, media_id = _download_telegram(url, tmpdir)
             elif platform == "youtube":
-                video_id, _ = parse_youtube_url(url)
-                existing = _check_duplicate(platform, "*", video_id, output_dir)
-                if existing:
-                    print(f"Skipped (already exists): {', '.join(os.path.basename(p) for p in existing)}", file=sys.stderr)
-                    print("Use --force to re-download.", file=sys.stderr)
-                    return existing
-        except ValueError:
-            pass  # URL parsing failed, let download handle the error
+                username, media_id = _download_youtube(url, tmpdir, mp3=mp3, progress_callback=progress_callback)
+            else:
+                raise DownloadError(f"No download handler for platform: {platform}")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        if platform == "twitter":
-            username, media_id = _download_twitter(url, tmpdir, progress_callback=progress_callback)
-        elif platform == "instagram":
-            username, media_id = _download_instagram(url, tmpdir)
-        elif platform == "telegram":
-            username, media_id = _download_telegram(url, tmpdir)
-        elif platform == "youtube":
-            username, media_id = _download_youtube(url, tmpdir, mp3=mp3, progress_callback=progress_callback)
-        else:
-            raise DownloadError(f"No download handler for platform: {platform}")
+            # Collect all downloaded files and ensure video compatibility (skip for mp3)
+            downloaded_paths = _collect_files(tmpdir)
+            if not mp3:
+                downloaded_paths = [_ensure_h264(p, progress_callback=progress_callback) for p in downloaded_paths]
+            if not downloaded_paths:
+                raise DownloadError("No media files were downloaded.")
 
-        # Collect all downloaded files and ensure video compatibility (skip for mp3)
-        downloaded_paths = _collect_files(tmpdir)
-        if not mp3:
-            downloaded_paths = [_ensure_h264(p, progress_callback=progress_callback) for p in downloaded_paths]
-        if not downloaded_paths:
-            raise DownloadError("No media files were downloaded.")
+            # Extract just filenames for renaming
+            downloaded_names = [os.path.basename(p) for p in downloaded_paths]
+            name_map = build_filenames(username, media_id, downloaded_names)
 
-        # Extract just filenames for renaming
-        downloaded_names = [os.path.basename(p) for p in downloaded_paths]
-        name_map = build_filenames(username, media_id, downloaded_names)
+            saved_paths = []
+            for full_path, orig_name in zip(downloaded_paths, downloaded_names):
+                new_name = name_map[orig_name]
+                dst = output_dir / new_name
+                shutil.move(full_path, dst)
+                saved_paths.append(str(dst))
 
-        saved_paths = []
-        for full_path, orig_name in zip(downloaded_paths, downloaded_names):
-            new_name = name_map[orig_name]
-            dst = output_dir / new_name
-            shutil.move(full_path, dst)
-            saved_paths.append(str(dst))
-
-    return saved_paths
+        return saved_paths
+    except ValueError as e:
+        raise DownloadError(str(e)) from e
 
 
 def _download_youtube_playlist_media(url: str, output_dir: Path, mp3: bool = False, progress_callback=None) -> list[str]:

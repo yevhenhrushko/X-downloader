@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import quote
 
 from telegram import (
     InlineKeyboardButton,
@@ -15,7 +16,7 @@ from telegram import (
     InputMediaDocument,
     Update,
 )
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ChatAction
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from download import (
@@ -374,7 +375,10 @@ async def _send_files(status_msg, file_paths: list[str]) -> None:
     sent_count = 0
     for i in range(0, len(sendable), 10):
         batch = sendable[i:i + 10]
-        await chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+        try:
+            await chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+        except Exception as e:
+            logger.warning(f"Failed to send upload action for batch {i + 1}–{i + len(batch)}: {e}")
 
         try:
             if len(batch) == 1:
@@ -414,9 +418,10 @@ async def _send_files(status_msg, file_paths: list[str]) -> None:
         if link:
             await chat.send_message(
                 f"File too large for Telegram ({size_mb:.1f} MB):\n"
-                f"[{filename}]({link})\n\n"
+                f"{filename}\n"
+                f"{link}\n\n"
                 f"Link expires in 24 hours.",
-                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
             )
         else:
             await chat.send_message(
@@ -456,7 +461,7 @@ def _serve_large_file(filepath: str) -> str | None:
         logger.error(f"Failed to move {filepath} to {dest}: {e}")
         return None
 
-    return f"{SERVER_URL}/{filename}"
+    return f"{SERVER_URL.rstrip('/')}/{quote(filename)}"
 
 
 # Map filenames users might send to the expected cookie file paths
